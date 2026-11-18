@@ -1,0 +1,12 @@
+build/
+.vs/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+FL Sampler.vst3/
+FL Sampler.exe
+docs/demo_808_chop.wav
