@@ -24,7 +24,7 @@ endif()
 
 juce_add_plugin(FLSampler
     COMPANY_NAME                "PAPIELGUAPO"
-    PLUGIN_MANUFACTURER_CODE    Papi
+    PLUGIN_MANUFACTURER_CODE    ILcl
     PLUGIN_CODE                 FlSm
     FORMATS                     VST3 Standalone
     PRODUCT_NAME                "FL Sampler"
