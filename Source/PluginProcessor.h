@@ -52,7 +52,11 @@ public:
     bool         hasSampleLoaded() const noexcept { return sampleLoaded.load(std::memory_order_relaxed); }
     int          getDetectedSampleRootNote() const noexcept { return detectedSampleRoot.load(std::memory_order_relaxed); }
     double       getDetectedSampleBpm() const noexcept { return detectedSampleBpm.load(std::memory_order_relaxed); }
+    double       getCurrentHostBpm() const noexcept { return currentHostBpm.load(std::memory_order_relaxed); }
     const std::vector<float>& getSliceMarkers() const noexcept { return sliceMarkers; }
+    void         addOrMoveSliceMarker(int existingIdx, float normPos, float& outActualPos);
+    void         removeSliceMarker(int index);
+    void         clearSliceMarkers();
 
     // Thread-safe copy of processed sample buffer for WAVScope waveform display
     void getProcessedWaveformCopy(juce::AudioBuffer<float>& outBuf) const;

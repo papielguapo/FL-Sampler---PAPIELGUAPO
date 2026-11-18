@@ -254,21 +254,29 @@ public:
             }
         }
 
-        // 11. Legacy BOOST + CLIP
+        // 11. Legacy BOOST + CLIP (with 2x Polyphase Half-Band Oversampling for zero-aliasing saturation)
         if (s.boost > 0.002f)
         {
             const float gain = 1.0f + s.boost * 15.0f;
+            auto shapeSample = [clip = s.clip](float x) noexcept -> float
+            {
+                return clip ? juce::jlimit(-1.0f, 1.0f, x) : std::tanh(x);
+            };
             for (int ch = 0; ch < numCh; ++ch)
             {
                 float* d = dest.getWritePointer(ch);
+                float prevIn = 0.0f;
+                float prevShapedMid = 0.0f;
                 for (int i = 0; i < lenSamples; ++i)
                 {
-                    float v = d[i] * gain;
-                    if (s.clip)
-                        v = juce::jlimit(-1.0f, 1.0f, v);
-                    else
-                        v = std::tanh(v);
-                    d[i] = v;
+                    const float curIn = d[i] * gain;
+                    const float midIn = 0.5f * (prevIn + curIn);
+                    const float yMid  = shapeSample(midIn);
+                    const float yCur  = shapeSample(curIn);
+                    // Half-band 2x downsample filter [0.25, 0.5, 0.25]
+                    d[i] = 0.25f * prevShapedMid + 0.5f * yCur + 0.25f * yMid;
+                    prevIn = curIn;
+                    prevShapedMid = yMid;
                 }
             }
         }

@@ -404,6 +404,10 @@ public:
             m.addItem(5, "Set loop end here");
             m.addItem(8, "Snap loop/start to zero-crossing", true, zSnap);
             m.addSeparator();
+            m.addItem(13, "Add slice marker here (Shift+Click)");
+            m.addItem(14, "Remove nearest slice marker");
+            m.addItem(15, "Clear custom slice markers");
+            m.addSeparator();
             m.addItem(9, "Multichannel waveform view", true, displayMode == 1);
             m.addItem(10, "Spectrum view", true, displayMode == 2);
             m.addItem(11, "Reset zoom (100%)");
@@ -412,7 +416,8 @@ public:
             m.addItem(7, "Reverse", true, rev);
 
             const float clickNorm = processor.snapNormalizedToZeroCrossing(pixelXToNorm((float)e.x));
-            m.showMenuAsync(juce::PopupMenu::Options(), [this, clickNorm, useLoop, pingPong, rev, norm, zSnap](int res)
+            const int nearSlice = hitTestSliceIndex(e.x, 12.0f);
+            m.showMenuAsync(juce::PopupMenu::Options(), [this, clickNorm, nearSlice, useLoop, pingPong, rev, norm, zSnap](int res)
             {
                 auto setParam = [this](const char* id, float v) {
                     if (auto* p = processor.apvts.getParameter(id))
@@ -426,6 +431,9 @@ public:
                 else if (res == 4) { setParam("useLoopPoints", 1.0f); setParam("loopStart", juce::jmin(0.98f, clickNorm)); }
                 else if (res == 5) { setParam("useLoopPoints", 1.0f); setParam("loopEnd", juce::jmax(0.02f, clickNorm)); }
                 else if (res == 8) processor.zeroCrossSnap.store(!zSnap);
+                else if (res == 13) { float outP = 0.0f; processor.addOrMoveSliceMarker(-1, clickNorm, outP); }
+                else if (res == 14 && nearSlice >= 0) processor.removeSliceMarker(nearSlice);
+                else if (res == 15) processor.clearSliceMarkers();
                 else if (res == 9) displayMode = (displayMode == 1) ? 0 : 1;
                 else if (res == 10) displayMode = (displayMode == 2) ? 0 : 2;
                 else if (res == 11) { viewStartNorm = 0.0f; viewEndNorm = 1.0f; }
@@ -436,7 +444,28 @@ public:
             return;
         }
 
-        // Check if dragging Loop Start (1), Loop End (2), or Start Offset (3) marker directly on the waveform!
+        // Shift+Click adds or drags a manual Slice Marker directly on the waveform!
+        if (e.mods.isShiftDown())
+        {
+            int sIdx = hitTestSliceIndex(e.x, 8.0f);
+            float actualPos = 0.0f;
+            processor.addOrMoveSliceMarker(sIdx, pixelXToNorm((float)e.x), actualPos);
+            const auto& slices = processor.getSliceMarkers();
+            for (int i = 0; i < (int)slices.size(); ++i)
+            {
+                if (std::abs(slices[(size_t)i] - actualPos) < 0.0005f)
+                {
+                    draggingMarker = 100 + i;
+                    break;
+                }
+            }
+            if (onHintChanged)
+                onHintChanged("Slice marker: " + juce::String((int)std::round(actualPos * 100.0f)) + "%");
+            repaint();
+            return;
+        }
+
+        // Check if dragging Loop Start (1), Loop End (2), Start Offset (3), or Slice Marker (100+i) directly on the waveform!
         draggingMarker = hitTestMarker(e.x);
         if (draggingMarker != 0)
             return;
@@ -501,6 +530,23 @@ public:
             if (onHintChanged)
                 onHintChanged("Sample start offset: " + juce::String((int)std::round(norm * 100.0f)) + "%");
         }
+        else if (draggingMarker >= 100) // Manual Slice Marker Drag
+        {
+            int sliceIdx = draggingMarker - 100;
+            float actualPos = 0.0f;
+            processor.addOrMoveSliceMarker(sliceIdx, norm, actualPos);
+            const auto& slices = processor.getSliceMarkers();
+            for (int i = 0; i < (int)slices.size(); ++i)
+            {
+                if (std::abs(slices[(size_t)i] - actualPos) < 0.0005f)
+                {
+                    draggingMarker = 100 + i;
+                    break;
+                }
+            }
+            if (onHintChanged)
+                onHintChanged("Slice #" + juce::String(sliceIdx + 1) + ": " + juce::String((int)std::round(actualPos * 100.0f)) + "%");
+        }
         repaint();
     }
 
@@ -560,6 +606,21 @@ public:
     }
 
 private:
+    int hitTestSliceIndex(int mouseX, float tolerancePx = 5.0f) const
+    {
+        const int stretchMode = (int)processor.apvts.getRawParameterValue("stretchMode")->load();
+        if (!processor.loadSliceMarkers.load(std::memory_order_relaxed) && stretchMode != 5 && stretchMode != 6)
+            return -1;
+        const auto& slices = processor.getSliceMarkers();
+        for (int i = 0; i < (int)slices.size(); ++i)
+        {
+            float sx = normToPixelX(slices[(size_t)i]);
+            if (std::abs((float)mouseX - sx) <= tolerancePx)
+                return i;
+        }
+        return -1;
+    }
+
     int hitTestMarker(int mouseX) const
     {
         const bool useLoop = processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f;
@@ -578,6 +639,9 @@ private:
             const float sx = normToPixelX(startOfs);
             if (std::abs((float)mouseX - sx) <= 6.0f) return 3;
         }
+        int sIdx = hitTestSliceIndex(mouseX, 5.0f);
+        if (sIdx >= 0)
+            return 100 + sIdx;
         return 0;
     }
 

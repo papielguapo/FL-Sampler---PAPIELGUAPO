@@ -156,6 +156,7 @@ private:
     std::vector<std::unique_ptr<ComboAttachment>>  comboAttachments;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
+    juce::Image privateSkinBg;
     int previewHeldMidiNote = -1;
     int draggingEnvNodeIdx  = -1; // -1=none, 0=Delay, 1=Attack, 2=Hold, 3=Decay/Sustain, 4=Release
     int draggingKeyRegionEdge = 0; // 0=none, 1=low, 2=high

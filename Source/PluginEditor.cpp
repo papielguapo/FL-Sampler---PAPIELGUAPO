@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 using namespace fls;
 
@@ -18,6 +19,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
       wavScope(p)
 {
     setLookAndFeel(&flLookAndFeel);
+    privateSkinBg = juce::ImageCache::getFromMemory(BinaryData::Skin_jpg, BinaryData::Skin_jpgSize);
 
     // Make contentCanvas pass mouse clicks to the editor when clicking custom-painted regions (tabs, keyboard, etc.)
     contentCanvas.setInterceptsMouseClicks(false, true);
@@ -264,6 +266,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
         float v = (float)lfoDelayKnob.getValue();
         audioProcessor.lfoDelayAmt.store(v, std::memory_order_relaxed);
         audioProcessor.targetLfos[(size_t)currentInsTarget].delay = v;
+        repaint();
     };
     setupKnob(lfoAttKnob,   "LFO attack", 0.35);
     lfoAttKnob.setRange(0.0, 1.0, 0.01);
@@ -273,6 +276,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
         float v = (float)lfoAttKnob.getValue();
         audioProcessor.lfoAttackAmt.store(v, std::memory_order_relaxed);
         audioProcessor.targetLfos[(size_t)currentInsTarget].attack = v;
+        repaint();
     };
     setupKnob(lfoAmtKnob,   "LFO amount", 0.0, true);
     setupKnob(lfoSpeedKnob, "LFO speed",  0.5);
@@ -286,7 +290,14 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     lfoAmtKnob.setDefaultResetValue(0.0);
     lfoSpeedKnob.setDefaultResetValue(0.5);
     lfoAmtKnob.onValueChange   = [this]() { audioProcessor.targetLfos[(size_t)currentInsTarget].amount = (float)lfoAmtKnob.getValue(); repaint(); };
-    lfoSpeedKnob.onValueChange = [this]() { audioProcessor.targetLfos[(size_t)currentInsTarget].speed  = (float)lfoSpeedKnob.getValue(); repaint(); };
+    lfoSpeedKnob.onValueChange = [this]()
+    {
+        float v = (float)lfoSpeedKnob.getValue();
+        audioProcessor.targetLfos[(size_t)currentInsTarget].speed = v;
+        if (lfoTempoBtn.getToggleState())
+            setHintText("LFO speed (Sync): " + juce::String(fls::SamplerEngine::getMusicalDivisionName(v)));
+        repaint();
+    };
 
     setupKnob(filterModXKnob, "Filter cutoff (Mod X)",    1.0, false, false, false);
     setupKnob(filterModYKnob, "Filter resonance (Mod Y)", 0.0, false, false, false);
@@ -472,6 +483,11 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     };
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "arpTime", arpTimeKnob));
     arpTimeKnob.setDefaultResetValue(0.125);
+    arpTimeKnob.onValueChange = [this]()
+    {
+        float norm = (float)arpTimeKnob.valueToProportionOfLength(arpTimeKnob.getValue());
+        setHintText("Arpeggiator time: " + juce::String(fls::SamplerEngine::getMusicalDivisionName(1.0f - norm)));
+    };
 
     // 7. Echo delay / fat mode
     setupKnob(echoFeedKnob,  "Echo feedback", 0.45);
@@ -514,6 +530,11 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "echoPingPong", echoPingPongBtn));
     echoFeedKnob.setDefaultResetValue(0.45);
     echoTimeKnob.setDefaultResetValue(0.20);
+    echoTimeKnob.onValueChange = [this]()
+    {
+        float norm = (float)echoTimeKnob.valueToProportionOfLength(echoTimeKnob.getValue());
+        setHintText("Echo delay time: " + juce::String(fls::SamplerEngine::getMusicalDivisionName(1.0f - norm)));
+    };
 
     // Make window freely resizable with fixed aspect ratio (75% .. 250% scale of 526x456)
     setResizable(true, true);
@@ -794,9 +815,10 @@ static void drawFLPanel(juce::Graphics& g, juce::Rectangle<int> r, const juce::S
     }
     if (FLColors::skinMode == 2)
     {
-        g.setColour(FLColors::panelBg());
+        // Translucent dark-glass card so VOCESFX Skin 1 background shines through cleanly!
+        g.setColour(juce::Colour(0xc8120c18));
         g.fillRoundedRectangle(rf, 6.0f);
-        g.setColour(FLColors::panelBorder());
+        g.setColour(juce::Colour(0xffec4899).withAlpha(0.38f));
         g.drawRoundedRectangle(rf.reduced(0.5f), 6.0f, 1.1f);
 
         if (title.isNotEmpty())
@@ -995,8 +1017,17 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
     juce::Graphics::ScopedSaveState sss(g);
     g.addTransform(juce::AffineTransform::scale(scaleX, scaleY));
 
+    // Draw VOCESFX Skin 1 background image when PRIVATE skin (skinMode == 2) is active!
+    if (FLColors::isPrivateSkin && privateSkinBg.isValid())
+    {
+        g.drawImage(privateSkinBg, juce::Rectangle<float>(0.0f, 0.0f, (float)kDesignW, (float)kDesignH),
+                    juce::RectanglePlacement::stretchToFit);
+        g.setColour(juce::Colours::black.withAlpha(0.32f));
+        g.fillRect(0, 0, kDesignW, kDesignH);
+    }
+
     // 1. Top Header Bar (y: 0..42)
-    g.setColour(FLColors::headerBg());
+    g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xd8140d1c) : FLColors::headerBg());
     g.fillRect(0, 0, kDesignW, 42);
     g.setColour(FLColors::panelBorder());
     g.drawHorizontalLine(42, 0.0f, (float)kDesignW);
@@ -1008,8 +1039,14 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawRect(0, 0, kDesignW, kDesignH, 2);
     }
 
-    // 4-Way Skin Switcher Pill Button ("SKIN: FL" | "SKIN: LIVE" | "PRIVATE" | "SKIN: BLACK") in Top Header Bar
+    // Magnifying Glass (Lupa) icon on the left, with Skin Switcher Button ("SKIN: FL" | "SKIN: LIVE" | "PRIVATE" | "SKIN: BLACK") on its right!
     {
+        const float lupaX = 135.0f;
+        const float lupaY = 13.0f;
+        g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xff06b6d4) : FLColors::greenNeon());
+        g.drawEllipse(lupaX, lupaY, 10.5f, 10.5f, 1.6f);
+        g.drawLine(lupaX + 8.8f, lupaY + 8.8f, lupaX + 13.8f, lupaY + 13.8f, 2.0f);
+
         auto sr = skinToggleBtnRect.toFloat();
         g.setColour(FLColors::recessedBg());
         g.fillRoundedRectangle(sr, FLColors::skinMode == 1 ? 0.0f : 3.0f);
@@ -1020,29 +1057,23 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
         const char* skinNames[4] = { "SKIN: FL", "SKIN: LIVE", "PRIVATE", "SKIN: BLACK" };
         g.drawText(skinNames[juce::jlimit(0, 3, FLColors::skinMode)], skinToggleBtnRect, juce::Justification::centred, false);
-    }
 
-    // Magnifying Glass (Lupa) icon + PAPIELGUAPO signature immediately to the right of the Lupa!
-    {
-        const float lupaX = 192.0f;
-        const float lupaY = 12.0f;
-        g.setColour(FLColors::skinMode == 2 ? juce::Colour(0xff06b6d4) : FLColors::greenNeon());
-        g.drawEllipse(lupaX, lupaY, 11.0f, 11.0f, 1.6f);
-        g.drawLine(lupaX + 9.2f, lupaY + 9.2f, lupaX + 14.5f, lupaY + 14.5f, 2.0f);
-
-        // Draw vector PAPIELGUAPO signature directly to the right of the magnifying glass (no skull!)
-        FLColors::drawPapielguapoSignature(g, lupaX + 18.0f, 11.0f, 18.0f,
-            FLColors::skinMode == 2 ? juce::Colour(0xffec4899) : FLColors::textBright());
+        // Draw PAPIELGUAPO vector signature ONLY in the PRIVATE skin (omitted in all other skins!)
+        if (FLColors::isPrivateSkin && currentHintText.isEmpty())
+        {
+            FLColors::drawPapielguapoSignature(g, (float)skinToggleBtnRect.getRight() + 6.0f, 11.0f, 18.0f,
+                juce::Colour(0xffec4899));
+        }
     }
 
     // FL Hint Bar readout in header bar when active
     if (currentHintText.isNotEmpty())
     {
         g.setColour(FLColors::recessedBg().withAlpha(0.95f));
-        g.fillRoundedRectangle(190.0f, 9.0f, 124.0f, 24.0f, FLColors::skinMode == 1 ? 0.0f : 3.0f);
+        g.fillRoundedRectangle(212.0f, 9.0f, 104.0f, 24.0f, FLColors::skinMode == 1 ? 0.0f : 3.0f);
         g.setColour(FLColors::textDim());
-        g.setFont(juce::Font(juce::FontOptions(10.0f)));
-        g.drawText(currentHintText, 194, 9, 116, 24, juce::Justification::centredLeft, true);
+        g.setFont(juce::Font(juce::FontOptions(9.5f)));
+        g.drawText(currentHintText, 215, 9, 98, 24, juce::Justification::centredLeft, true);
     }
 
     // 3 Left Sheet Tab Icons (Waveform, Envelope, Wrench)
@@ -1149,9 +1180,12 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         drawIconBtn(removeFileBtnRect, 2);
         drawIconBtn(locateFileBtnRect, 1);
 
-        // PAPIELGUAPO signature immediately to the right of the Lupa button in the File bar as well!
-        FLColors::drawPapielguapoSignature(g, (float)locateFileBtnRect.getRight() + 4.0f, (float)locateFileBtnRect.getY() + 5.0f, 14.0f,
-            FLColors::skinMode == 2 ? juce::Colour(0xffec4899) : FLColors::greenNeon());
+        // PAPIELGUAPO signature to the right of the Lupa button in the File bar ONLY in PRIVATE skin!
+        if (FLColors::isPrivateSkin)
+        {
+            FLColors::drawPapielguapoSignature(g, (float)locateFileBtnRect.getRight() + 4.0f, (float)locateFileBtnRect.getY() + 5.0f, 14.0f,
+                juce::Colour(0xffec4899));
+        }
 
         // Content Panel (x=6, y=94, w=252, h=106)
         drawFLPanel(g, { 6, 94, 252, 106 }, "Content");
@@ -1290,23 +1324,29 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
             float x4 = x3 + juce::jmax(18.0f, dec);
             float x5 = x4 + juce::jmax(18.0f, rel);
 
+            const float attTens = (float)envAttTensionKnob.getValue();
+            const float decTens = (float)envDecTensionKnob.getValue();
+            const float relTens = (float)envRelTensionKnob.getValue();
+
             juce::Path p;
             p.startNewSubPath(x0, yBot);
             p.lineTo(x1, yBot);
-            p.lineTo(x2, yPeak);
+            p.quadraticTo((x1 + x2) * 0.5f, (yBot + yPeak) * 0.5f - attTens * 22.0f, x2, yPeak);
             p.lineTo(x3, yPeak);
-            p.quadraticTo((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f + 10.0f, x4, ySus);
-            p.quadraticTo((x4 + x5) * 0.5f, yBot, x5, yBot);
+            p.quadraticTo((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f - decTens * 22.0f, x4, ySus);
+            p.quadraticTo((x4 + x5) * 0.5f, (ySus + yBot) * 0.5f - relTens * 22.0f, x5, yBot);
 
             g.setColour(activeCol);
             g.strokePath(p, juce::PathStrokeType(1.8f));
 
-            // Live Envelope Playhead Dot when a voice is active
-            if (isEnvActive && audioProcessor.getActivePlayheadNorm() >= 0.0f)
+            // Live Envelope Playhead Dot when a voice is active (using real voice age in seconds!)
+            const float voiceAgeSec = audioProcessor.getActiveVoiceAgeSec();
+            if (isEnvActive && voiceAgeSec >= 0.0f)
             {
-                const float envAge = audioProcessor.getActivePlayheadNorm();
+                const float totEnvSec = juce::jmax(0.08f, (float)(envDelayKnob.getValue() * 2.0 + envAttackKnob.getValue() * 3.0 + envHoldKnob.getValue() * 2.0 + envDecayKnob.getValue() * 4.0 + 0.35));
+                const float envNorm = juce::jlimit(0.0f, 1.0f, voiceAgeSec / totEnvSec);
                 const float cursorX = juce::jlimit((float)envGraph.getX(), (float)envGraph.getRight(),
-                                                   x0 + envAge * (x5 - x0));
+                                                   x0 + envNorm * (x5 - x0));
                 g.setColour(activeCol.withAlpha(0.65f));
                 g.drawVerticalLine((int)cursorX, (float)envGraph.getY(), (float)envGraph.getBottom());
             }
@@ -1321,7 +1361,7 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
             drawNode(x1, yBot);
             drawNode(x2, yPeak);
             drawNode(x3, yPeak);
-            drawNode((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f + 5.0f);
+            drawNode((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f - decTens * 11.0f);
             drawNode(x5, yBot);
 
             drawSmallCapLabel(g, envDelayKnob,   "DELAY");
@@ -1378,14 +1418,27 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(FLColors::recessedBg());
         g.fillRect(lfoGraph);
 
+        float lfoDel = (float)lfoDelayKnob.getValue() * 0.35f;
+        float lfoAtt = juce::jmax(0.02f, (float)lfoAttKnob.getValue() * 0.45f);
         float lfoAmt = (float)lfoAmtKnob.getValue();
         float lfoSpd = 1.0f + (float)lfoSpeedKnob.getValue() * 5.0f;
         juce::Path lfoPath;
         for (int x = 0; x < lfoGraph.getWidth(); ++x)
         {
             float t = (float)x / (float)lfoGraph.getWidth();
-            float env = (t < 0.25f) ? (t / 0.25f) : 1.0f;
-            float v = std::sin(t * lfoSpd * juce::MathConstants<float>::twoPi) * lfoAmt * env;
+            float env = 0.0f;
+            if (t >= lfoDel)
+                env = juce::jmin(1.0f, (t - lfoDel) / lfoAtt);
+            float ph = std::fmod(juce::jmax(0.0f, t - lfoDel) * lfoSpd, 1.0f);
+            float rawWave = 0.0f;
+            if (currentLfoShape == 0) // Sine
+                rawWave = std::sin(ph * juce::MathConstants<float>::twoPi);
+            else if (currentLfoShape == 1) // Triangle
+                rawWave = (ph < 0.25f) ? (ph * 4.0f) : ((ph < 0.75f) ? (2.0f - ph * 4.0f) : (ph * 4.0f - 4.0f));
+            else // Pulse
+                rawWave = (ph < 0.5f) ? 1.0f : -1.0f;
+
+            float v = rawWave * lfoAmt * env;
             float py = (float)lfoGraph.getCentreY() - v * (lfoGraph.getHeight() * 0.40f);
             if (x == 0) lfoPath.startNewSubPath((float)(lfoGraph.getX() + x), py);
             else        lfoPath.lineTo((float)(lfoGraph.getX() + x), py);
@@ -1393,9 +1446,9 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(activeCol);
         g.strokePath(lfoPath, juce::PathStrokeType(1.6f));
 
-        if (audioProcessor.getActivePlayheadNorm() >= 0.0f)
+        if (audioProcessor.getActiveVoiceAgeSec() >= 0.0f)
         {
-            const float lfoPhase = std::fmod(audioProcessor.getActivePlayheadNorm() * lfoSpd, 1.0f);
+            const float lfoPhase = std::fmod(audioProcessor.getActiveVoiceAgeSec() * 0.5f, 1.0f);
             const int lx = lfoGraph.getX() + (int)(lfoPhase * (float)lfoGraph.getWidth());
             g.setColour(activeCol.withAlpha(0.65f));
             g.drawVerticalLine(lx, (float)lfoGraph.getY(), (float)lfoGraph.getBottom());
@@ -1506,7 +1559,7 @@ void FLSamplerAudioProcessorEditor::resized()
     tabRectWave       = { 4,   2, 42, 38 };
     tabRectEnv        = { 46,  2, 42, 38 };
     tabRectFunc       = { 88,  2, 42, 38 };
-    skinToggleBtnRect = { 134, 9, 54, 24 };
+    skinToggleBtnRect = { 152, 9, 56, 24 }; // Placed immediately to the right of the Lupa icon (x=135..149)!
 
     masterOnBtn.setBounds(320, 10, 16, 16);
     masterPanKnob.setBounds(346, 2, 28, 28);
@@ -1676,7 +1729,7 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
     const juce::Point<int> pt((int)std::round(e.position.x / juce::jmax(0.1f, scaleX)),
                               (int)std::round(e.position.y / juce::jmax(0.1f, scaleY)));
 
-    // Header Sheet Tabs & 3-Way Skin Toggle (FL -> LIVE -> PRIVATE)
+    // Header Sheet Tabs & 4-Way Skin Toggle (FL -> LIVE -> PRIVATE -> BLACK)
     if (tabRectWave.contains(pt)) { updateActiveSheet(0); setHintText("Sample settings"); return; }
     if (tabRectEnv.contains(pt))  { updateActiveSheet(1); setHintText("Envelope / instrument settings"); return; }
     if (tabRectFunc.contains(pt)) { updateActiveSheet(2); setHintText("Miscellaneous functions"); return; }
@@ -1684,9 +1737,10 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
     {
         const int nextSkin = (FLColors::skinMode + 1) % 4;
         FLColors::setSkinMode(nextSkin);
+        flLookAndFeel.refreshThemeColours();
         setHintText(nextSkin == 0 ? "Skin: FL Studio 2026 Look"
                   : (nextSkin == 1 ? "Skin: Ableton Live 12 Look"
-                  : (nextSkin == 2 ? "Skin: PRIVATE (GrowthTune Obsidian/Magenta)"
+                  : (nextSkin == 2 ? "Skin: PRIVATE (VOCESFX + GrowthTune)"
                                    : "Skin: BLACK (Pure Pitch-Black Stealth)")));
         contentCanvas.repaint();
         repaint();

@@ -191,9 +191,13 @@ public:
 
     bool  active       = false;
     int   midiNote     = 60;
+    int   midiChannel  = 1;     // Supports MPE per-channel note expression & FL Slide Notes
+    float mpePitchBend = 0.0f;  // Per-note MPE pitch bend in semitones
     float velocity     = 1.0f;
     double position    = 0.0;
     double sliceEndIdx = -1.0; // >0 when Slice Map plays a single slice
+    double wsolaOffsetA = 0.0; // WSOLA correlation-aligned grain offset A
+    double wsolaOffsetB = 0.0; // WSOLA correlation-aligned grain offset B
     double grainPosB   = 0.0;
     double grainPhase  = 0.0;
     int   loopDir      = 1; // +1 forward, -1 backward (ping-pong)
@@ -212,9 +216,11 @@ public:
     float declickLevel = 1.0f;
     float declickStep  = 0.002f;
 
-    // Biquad SVF state per channel (Stage 1 + Stage 2 for 24dB/oct SVF LPx2)
+    // Biquad SVF state per channel (Stage 1 + Stage 2 for 24dB/oct SVF LPx2) + 2x Oversampling memory
     float z1L = 0.0f, z2L = 0.0f, z3L = 0.0f, z4L = 0.0f;
     float z1R = 0.0f, z2R = 0.0f, z3R = 0.0f, z4R = 0.0f;
+    float prevInL = 0.0f, prevInR = 0.0f;
+    float formLpL = 0.0f, formLpR = 0.0f;
 
     static double getDeclickDurationSec(int declickMode, bool isAttack) noexcept
     {
@@ -231,13 +237,17 @@ public:
     }
 
     void start(int note, float vel, double startSampleIdx, double prevNoteSemi, bool usePorta,
-               int declickMode, double sr, int shiftSamples = 0, double sliceEnd = -1.0)
+               int declickMode, double sr, int shiftSamples = 0, double sliceEnd = -1.0, int channel = 1)
     {
         active       = true;
         midiNote     = note;
+        midiChannel  = channel;
+        mpePitchBend = 0.0f;
         velocity     = vel;
         position     = startSampleIdx;
         sliceEndIdx  = sliceEnd;
+        wsolaOffsetA = 0.0;
+        wsolaOffsetB = 0.0;
         grainPosB    = startSampleIdx;
         grainPhase   = 0.0;
         loopDir      = 1;
@@ -270,6 +280,8 @@ public:
         declickLevel = 1.0f;
         z1L = z2L = z3L = z4L = 0.0f;
         z1R = z2R = z3R = z4R = 0.0f;
+        prevInL = prevInR = 0.0f;
+        formLpL = formLpR = 0.0f;
     }
 
     void triggerRelease(int declickMode, double sr, bool volEnvEnabled)
@@ -380,10 +392,13 @@ public:
         double lfoHz = 0.2 * std::pow(80.0, (double)lfo.speed);
         if (lfo.tempoSync && hostBpm > 20.0)
         {
-            // Quantize LFO rate to musical subdivisions of Host BPM (4 bars .. 1/32)
-            static constexpr double kBeatMultipliers[8] = { 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
-            int idx = juce::jlimit(0, 7, (int)std::round(lfo.speed * 7.0f));
-            lfoHz = (hostBpm / 60.0) * kBeatMultipliers[idx] * 0.5;
+            // Quantize LFO rate to 16 musical subdivisions of Host BPM (4 Bars .. 1/64, including Dotted & Triplets)
+            static constexpr double kCyclesPerBeat[16] = {
+                0.0625, 0.125, 0.25, 0.375, 0.5, 0.6667, 0.75, 1.0,
+                1.3333, 1.5,   2.0,  2.6667, 3.0, 4.0,   6.0,  8.0
+            };
+            int idx = juce::jlimit(0, 15, (int)std::round(lfo.speed * 15.0f));
+            lfoHz = (hostBpm / 60.0) * kCyclesPerBeat[idx];
         }
 
         const double timeRef = lfo.globalPhase ? globalClockSec : activeSec;
@@ -421,11 +436,50 @@ public:
         heldNotes.clear();
     }
 
+    static const char* getMusicalDivisionName(float norm0to1) noexcept
+    {
+        static constexpr const char* kNames[16] = {
+            "4 Bars", "2 Bars", "1 Bar", "1/2D", "1/2", "1/2T", "1/4D", "1/4",
+            "1/4T",   "1/8D",   "1/8",   "1/8T", "1/16D","1/16", "1/16T","1/32"
+        };
+        return kNames[juce::jlimit(0, 15, (int)std::round(norm0to1 * 15.0f))];
+    }
+
+    void setChannelPitchBend(int midiChannel, float normBend, int bendRangeSemitones) noexcept
+    {
+        if (midiChannel <= 1)
+            return;
+        for (auto& v : voices)
+        {
+            if (v.active && v.midiChannel == midiChannel)
+                v.mpePitchBend = normBend * (float)bendRangeSemitones;
+        }
+    }
+
     void noteOn(int note, float velocity, const juce::AudioBuffer<float>& sampleBuf, const SamplerRuntimeParams& p,
-                float customStartNorm = -1.0f, bool isArpGenerated = false)
+                float customStartNorm = -1.0f, bool isArpGenerated = false, int midiChannel = 1)
     {
         if (sampleBuf.getNumSamples() <= 1)
             return;
+
+        // FL Studio Slide Note / Legato MPE: if a note arrives on MIDI Channel >= 2 while another note is held,
+        // or when Porta + Mono are active and a note is already playing, glide the active voice in-place!
+        if (!isArpGenerated && customStartNorm < 0.0f && (midiChannel >= 2 || (p.porta && p.mono)))
+        {
+            for (auto& v : voices)
+            {
+                if (v.active && !v.declicking)
+                {
+                    v.targetSemi = (double)note;
+                    if (midiChannel == 1)
+                        v.midiNote = note;
+                    lastTriggeredNote = (double)note;
+                    if (std::find(heldNotes.begin(), heldNotes.end(), note) == heldNotes.end())
+                        heldNotes.push_back(note);
+                    return;
+                }
+            }
+        }
 
         // Respect Key Region bounds (unless triggered as a waveform scrub preview)
         if (customStartNorm < 0.0f && (note < p.keyRegionLow || note > p.keyRegionHigh))
@@ -513,7 +567,7 @@ public:
             : 0;
 
         const bool useGlide = p.porta || (isArpGenerated && p.arpSlide);
-        voices[slot].start(effectiveNote, velocity, startIdx, lastTriggeredNote, useGlide, p.declickMode, sr, shiftSamples, sliceEnd);
+        voices[slot].start(effectiveNote, velocity, startIdx, lastTriggeredNote, useGlide, p.declickMode, sr, shiftSamples, sliceEnd, midiChannel);
         lastTriggeredNote = (double)effectiveNote;
     }
 
@@ -780,10 +834,11 @@ public:
                     }
                 }
 
-                // Compute Pitch Shift & Playback Speed (including Pitch-Bend Wheel, Pitch Env & Pitch LFO)
+                // Compute Pitch Shift & Playback Speed (including Pitch-Bend Wheel, MPE Bend, Pitch Env & Pitch LFO)
                 double noteDeltaSemi = p.enableMainPitch ? (v.curNoteSemi - (double)p.rootNote) : 0.0;
                 double totalPitchSemi = noteDeltaSemi
                                       + (double)(p.masterPitch + p.pitchWheelNorm) * (double)p.pitchRange
+                                      + (double)v.mpePitchBend
                                       + (double)p.fineTuneCents / 100.0
                                       + (double)p.stretchPitch / 100.0
                                       + (double)(pitchEnvVal * p.targetEnvs[4].amount) * 24.0
@@ -829,27 +884,71 @@ public:
                 }
                 else
                 {
-                    // Independent Time-Stretch / Pitch-Shift (Stretch / e3 generic / Stretch pro with Formant Shift)
-                    const double formantRatio = (p.stretchMode == 6) ? std::pow(2.0, (double)p.formantShift / 12.0) : 1.0;
-                    const double grainSize = juce::jlimit(256.0, 2048.0, 1024.0 / formantRatio);
+                    // True WSOLA (Waveform Similarity Overlap-Add) + Formant Spectral Tilt Preserver ("Stretch" & "Stretch pro")
+                    const bool isStretchPro = (p.stretchMode == 4);
+                    const double formantRatio = isStretchPro ? std::pow(2.0, (double)p.formantShift / 12.0) : 1.0;
+                    const double grainSize = juce::jlimit(384.0, 2048.0, 1280.0 / formantRatio);
                     const double advancePos = rateRatio / timeStretchFactor;
-                    const double grainSlip  = (pitchRatio * formantRatio * rateRatio) - advancePos;
+                    const double grainRate  = pitchRatio * rateRatio;
+                    const double prevPhase  = v.grainPhase;
 
-                    v.grainPhase += std::abs(grainSlip) / grainSize;
+                    v.grainPhase += std::abs(grainRate - advancePos) / grainSize + (1.0 / grainSize);
                     if (v.grainPhase >= 1.0)
+                    {
                         v.grainPhase -= 1.0;
+                        // WSOLA cross-correlation alignment when grain A wraps around
+                        int baseIdx = juce::jlimit(32, smpLen - 96, (int)v.position);
+                        int refIdx  = juce::jlimit(32, smpLen - 96, (int)(v.position + v.wsolaOffsetB + grainSize * 0.5));
+                        float bestCorr = -1e9f;
+                        int bestDelta = 0;
+                        for (int d = -24; d <= 24; d += 3)
+                        {
+                            float c = 0.0f;
+                            for (int k = 0; k < 24; k += 4)
+                                c += smpL[refIdx + k] * smpL[baseIdx + d + k];
+                            if (c > bestCorr) { bestCorr = c; bestDelta = d; }
+                        }
+                        v.wsolaOffsetA = (double)bestDelta;
+                    }
+                    else if (prevPhase < 0.5 && v.grainPhase >= 0.5)
+                    {
+                        // WSOLA cross-correlation alignment when grain B wraps around at 0.5
+                        int baseIdx = juce::jlimit(32, smpLen - 96, (int)v.position);
+                        int refIdx  = juce::jlimit(32, smpLen - 96, (int)(v.position + v.wsolaOffsetA + grainSize * 0.5));
+                        float bestCorr = -1e9f;
+                        int bestDelta = 0;
+                        for (int d = -24; d <= 24; d += 3)
+                        {
+                            float c = 0.0f;
+                            for (int k = 0; k < 24; k += 4)
+                                c += smpL[refIdx + k] * smpL[baseIdx + d + k];
+                            if (c > bestCorr) { bestCorr = c; bestDelta = d; }
+                        }
+                        v.wsolaOffsetB = (double)bestDelta;
+                    }
 
                     double phA = v.grainPhase;
                     double phB = std::fmod(v.grainPhase + 0.5, 1.0);
                     float winA = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * (float)phA));
                     float winB = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * (float)phB));
 
-                    double sign = (grainSlip >= 0.0) ? 1.0 : -1.0;
-                    double posA = juce::jlimit(0.0, (double)(smpLen - 1), v.position + sign * phA * grainSize);
-                    double posB = juce::jlimit(0.0, (double)(smpLen - 1), v.position + sign * phB * grainSize);
+                    double posA = juce::jlimit(0.0, (double)(smpLen - 1), v.position + v.wsolaOffsetA + (phA - 0.5) * grainSize * pitchRatio);
+                    double posB = juce::jlimit(0.0, (double)(smpLen - 1), v.position + v.wsolaOffsetB + (phB - 0.5) * grainSize * pitchRatio);
 
                     sL = readCubic(smpL, smpLen, posA) * winA + readCubic(smpL, smpLen, posB) * winB;
                     sR = readCubic(smpR, smpLen, posA) * winA + readCubic(smpR, smpLen, posB) * winB;
+
+                    // Spectral formant compensation filter for Stretch Pro
+                    if (isStretchPro && (std::abs(p.formantShift) > 0.05f || std::abs(totalPitchSemi) > 0.25))
+                    {
+                        const float formTilt = juce::jlimit(-0.65f, 0.65f, (float)((p.formantShift - totalPitchSemi * 0.35) / 18.0));
+                        v.formLpL += 0.14f * (sL - v.formLpL);
+                        v.formLpR += 0.14f * (sR - v.formLpR);
+                        const float hpL = sL - v.formLpL;
+                        const float hpR = sR - v.formLpR;
+                        sL += (formTilt >= 0.0f) ? hpL * formTilt * 1.4f : v.formLpL * (-formTilt) * 1.4f;
+                        sR += (formTilt >= 0.0f) ? hpR * formTilt * 1.4f : v.formLpR * (-formTilt) * 1.4f;
+                    }
 
                     v.position += advancePos * (double)v.loopDir;
                 }
@@ -904,12 +1003,13 @@ public:
                     p.filterModY + p.modYOffset + trackDeltaNorm * p.trackModY * 0.5f
                     + modYEnvVal * p.targetEnvs[3].amount + (float)modYLfoVal * 0.5f);
 
-                // 6-Mode SVF Filter (0=Fast LP, 1=LP, 2=BP, 3=HP, 4=BS, 5=SVF LPx2 dual 24dB/oct with saturation)
+                // 6-Mode SVF Filter with 2x Oversampling (0=Fast LP, 1=LP, 2=BP, 3=HP, 4=BS, 5=SVF LPx2 dual 24dB/oct with saturation)
                 if (effFilterModX < 0.995f || effFilterModY > 0.005f || p.filterType != 0)
                 {
                     float cutNorm = juce::jlimit(0.02f, 0.995f, effFilterModX);
                     float cutoffHz = 35.0f * std::pow(500.0f, cutNorm);
-                    float g = std::tan(juce::MathConstants<float>::pi * juce::jmin(cutoffHz, (float)sr * 0.45f) / (float)sr);
+                    const float osSr = (float)sr * 2.0f;
+                    float g = std::tan(juce::MathConstants<float>::pi * juce::jmin(cutoffHz, osSr * 0.45f) / osSr);
                     float k = 2.0f - 1.92f * juce::jlimit(0.0f, 0.98f, effFilterModY);
                     float a1 = 1.0f / (1.0f + g * (g + k));
                     float a2 = g * a1;
@@ -931,14 +1031,26 @@ public:
                         }
                     };
 
-                    sL = processSVFStage(sL, v.z1L, v.z2L);
-                    sR = processSVFStage(sR, v.z1R, v.z2R);
+                    // 2x Zero-Delay Feedback Oversampled Pass (midpoint + current sample)
+                    const float midL = 0.5f * (v.prevInL + sL);
+                    const float midR = 0.5f * (v.prevInR + sR);
+                    v.prevInL = sL;
+                    v.prevInR = sR;
+
+                    float yMidL = processSVFStage(midL, v.z1L, v.z2L);
+                    float yMidR = processSVFStage(midR, v.z1R, v.z2R);
+                    float yCurL = processSVFStage(sL,   v.z1L, v.z2L);
+                    float yCurR = processSVFStage(sR,   v.z1R, v.z2R);
 
                     if (p.filterType == 5) // SVF LPx2: second cascaded 12dB stage + resonance soft-clip
                     {
-                        sL = std::tanh(processSVFStage(sL, v.z3L, v.z4L) * 1.15f);
-                        sR = std::tanh(processSVFStage(sR, v.z3R, v.z4R) * 1.15f);
+                        yMidL = std::tanh(processSVFStage(yMidL, v.z3L, v.z4L) * 1.15f);
+                        yMidR = std::tanh(processSVFStage(yMidR, v.z3R, v.z4R) * 1.15f);
+                        yCurL = std::tanh(processSVFStage(yCurL, v.z3L, v.z4L) * 1.15f);
+                        yCurR = std::tanh(processSVFStage(yCurR, v.z3R, v.z4R) * 1.15f);
                     }
+                    sL = 0.5f * (yMidL + yCurL);
+                    sR = 0.5f * (yMidR + yCurR);
                 }
 
                 // Voice gain + Pan (with Vol LFO, Pan Env, Pan LFO, Levels adjustment & Tracking)

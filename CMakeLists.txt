@@ -37,6 +37,11 @@ juce_add_plugin(FLSampler
     VST3_CATEGORIES             "Instrument" "Sampler"
 )
 
+juce_add_binary_data(FLSamplerAssets
+    SOURCES
+        Assets/Skin.jpg
+)
+
 target_sources(FLSampler
     PRIVATE
         Source/PluginProcessor.cpp
@@ -65,6 +70,7 @@ target_compile_definitions(FLSampler
 
 target_link_libraries(FLSampler
     PRIVATE
+        FLSamplerAssets
         juce::juce_audio_utils
         juce::juce_audio_processors
         juce::juce_audio_formats
