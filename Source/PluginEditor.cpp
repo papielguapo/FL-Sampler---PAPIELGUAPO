@@ -1039,14 +1039,8 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawRect(0, 0, kDesignW, kDesignH, 2);
     }
 
-    // Magnifying Glass (Lupa) icon on the left, with Skin Switcher Button ("SKIN: FL" | "SKIN: LIVE" | "PRIVATE" | "SKIN: BLACK") on its right!
+    // Skin Switcher Button ("SKIN: FL" | "SKIN: LIVE" | "PRIVATE" | "SKIN: BLACK") on the right of the 3 tab icons!
     {
-        const float lupaX = 135.0f;
-        const float lupaY = 13.0f;
-        g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xff06b6d4) : FLColors::greenNeon());
-        g.drawEllipse(lupaX, lupaY, 10.5f, 10.5f, 1.6f);
-        g.drawLine(lupaX + 8.8f, lupaY + 8.8f, lupaX + 13.8f, lupaY + 13.8f, 2.0f);
-
         auto sr = skinToggleBtnRect.toFloat();
         g.setColour(FLColors::recessedBg());
         g.fillRoundedRectangle(sr, FLColors::skinMode == 1 ? 0.0f : 3.0f);
@@ -1070,13 +1064,13 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
     if (currentHintText.isNotEmpty())
     {
         g.setColour(FLColors::recessedBg().withAlpha(0.95f));
-        g.fillRoundedRectangle(212.0f, 9.0f, 104.0f, 24.0f, FLColors::skinMode == 1 ? 0.0f : 3.0f);
+        g.fillRoundedRectangle(198.0f, 9.0f, 118.0f, 24.0f, FLColors::skinMode == 1 ? 0.0f : 3.0f);
         g.setColour(FLColors::textDim());
         g.setFont(juce::Font(juce::FontOptions(9.5f)));
-        g.drawText(currentHintText, 215, 9, 98, 24, juce::Justification::centredLeft, true);
+        g.drawText(currentHintText, 201, 9, 112, 24, juce::Justification::centredLeft, true);
     }
 
-    // 3 Left Sheet Tab Icons (Waveform, Envelope, Wrench)
+    // 3 Left Sheet Tab Icons (Waveform, Envelope, Magnifying Glass / Lupa)
     // Tab 0: Waveform icon
     {
         g.setColour(currentSheet == 0 ? FLColors::recessedBg() : juce::Colours::transparentBlack);
@@ -1116,16 +1110,16 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawEllipse(x0 + 16.0f, y0 - 2.0f, 4.0f, 4.0f, 1.4f);
     }
 
-    // Tab 2: Wrench (Misc functions) icon
+    // Tab 2: Magnifying Glass (Lupa) icon (Misc functions)
     {
         g.setColour(currentSheet == 2 ? FLColors::recessedBg() : juce::Colours::transparentBlack);
         g.fillRect(tabRectFunc);
 
-        float cx = (float)tabRectFunc.getCentreX();
-        float cy = (float)tabRectFunc.getCentreY();
+        const float lupaX = (float)tabRectFunc.getCentreX() - 6.5f;
+        const float lupaY = (float)tabRectFunc.getCentreY() - 6.5f;
         g.setColour(currentSheet == 2 ? FLColors::greenNeon() : juce::Colours::white);
-        g.drawLine(cx - 7.0f, cy + 7.0f, cx + 3.0f, cy - 3.0f, 2.5f);
-        g.drawEllipse(cx + 0.5f, cy - 8.5f, 8.0f, 8.0f, 1.8f);
+        g.drawEllipse(lupaX, lupaY, 10.5f, 10.5f, 1.8f);
+        g.drawLine(lupaX + 8.8f, lupaY + 8.8f, lupaX + 13.8f, lupaY + 13.8f, 2.2f);
     }
 
     // Master Header Labels (ON, PAN, VOL, PITCH, RANGE, TRACK)
@@ -1559,7 +1553,7 @@ void FLSamplerAudioProcessorEditor::resized()
     tabRectWave       = { 4,   2, 42, 38 };
     tabRectEnv        = { 46,  2, 42, 38 };
     tabRectFunc       = { 88,  2, 42, 38 };
-    skinToggleBtnRect = { 152, 9, 56, 24 }; // Placed immediately to the right of the Lupa icon (x=135..149)!
+    skinToggleBtnRect = { 136, 9, 56, 24 }; // Placed immediately to the right of the Tab 2 Lupa icon (x=88..130)!
 
     masterOnBtn.setBounds(320, 10, 16, 16);
     masterPanKnob.setBounds(346, 2, 28, 28);
@@ -1732,7 +1726,75 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
     // Header Sheet Tabs & 4-Way Skin Toggle (FL -> LIVE -> PRIVATE -> BLACK)
     if (tabRectWave.contains(pt)) { updateActiveSheet(0); setHintText("Sample settings"); return; }
     if (tabRectEnv.contains(pt))  { updateActiveSheet(1); setHintText("Envelope / instrument settings"); return; }
-    if (tabRectFunc.contains(pt)) { updateActiveSheet(2); setHintText("Miscellaneous functions"); return; }
+    if (tabRectFunc.contains(pt))
+    {
+        if (e.mods.isPopupMenu() || (currentSheet == 2 && !e.mods.isShiftDown()))
+        {
+            juce::PopupMenu m;
+            m.addSectionHeader("Lupa / Quick Actions");
+            m.addItem(1, "Sample settings", true, currentSheet == 0);
+            m.addItem(2, "Envelope / instrument settings", true, currentSheet == 1);
+            m.addItem(3, "Miscellaneous functions", true, currentSheet == 2);
+            m.addSeparator();
+            m.addItem(10, "Load sample file...");
+            m.addItem(11, "Next sample in folder");
+            m.addItem(12, "Previous sample in folder");
+            m.addItem(13, "Detect pitch & set root note");
+            m.addItem(14, "Auto-detect loop points");
+            m.addSeparator();
+            juce::PopupMenu skinMenu;
+            skinMenu.addItem(20, "SKIN: FL Studio 2026", true, FLColors::skinMode == 0);
+            skinMenu.addItem(21, "SKIN: Ableton Live 12", true, FLColors::skinMode == 1);
+            skinMenu.addItem(22, "PRIVATE (VOCESFX + PAPIELGUAPO)", true, FLColors::skinMode == 2);
+            skinMenu.addItem(23, "SKIN: BLACK Stealth", true, FLColors::skinMode == 3);
+            m.addSubMenu("Skin / Theme", skinMenu);
+
+            m.showMenuAsync(juce::PopupMenu::Options(), [this](int res)
+            {
+                if (res >= 1 && res <= 3)
+                {
+                    updateActiveSheet(res - 1);
+                }
+                else if (res == 10)
+                {
+                    openSampleFileChooser();
+                }
+                else if (res == 11 || res == 12)
+                {
+                    audioProcessor.stepFolderSample(res == 11 ? 1 : -1);
+                    wavScope.refreshIfNeeded();
+                    setHintText("Loaded: " + audioProcessor.getLoadedFileName());
+                    repaint();
+                }
+                else if (res == 13)
+                {
+                    const int root = audioProcessor.getDetectedSampleRootNote();
+                    if (auto* p = audioProcessor.apvts.getParameter("rootNote"))
+                        p->setValueNotifyingHost(p->convertTo0to1((float)root));
+                    setHintText("Detected root note: MIDI " + juce::String(root));
+                    repaint();
+                }
+                else if (res == 14)
+                {
+                    if (auto* p = audioProcessor.apvts.getParameter("useLoop"))
+                        p->setValueNotifyingHost(1.0f);
+                    setHintText("Loop points enabled");
+                    repaint();
+                }
+                else if (res >= 20 && res <= 23)
+                {
+                    FLColors::setSkinMode(res - 20);
+                    flLookAndFeel.refreshThemeColours();
+                    contentCanvas.repaint();
+                    repaint();
+                }
+            });
+            return;
+        }
+        updateActiveSheet(2);
+        setHintText("Miscellaneous functions (click again or right-click for Lupa menu)");
+        return;
+    }
     if (skinToggleBtnRect.contains(pt))
     {
         const int nextSkin = (FLColors::skinMode + 1) % 4;
