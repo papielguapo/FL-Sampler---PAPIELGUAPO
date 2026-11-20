@@ -11,21 +11,45 @@ FLSamplerAudioProcessor::FLSamplerAudioProcessor()
     const char* precomputeIds[] = {
         "removeDc", "normalize", "reverse", "reversePol", "fadeStereo", "swapStereo",
         "smpStart", "length", "fadeIn", "fadeOut", "crossfade", "trim",
-        "boost", "clip", "eq", "rmMix", "rmFreq", "cut", "res", "reverb", "reverbB", "stereoDelay", "pogo"
+        "boost", "clip", "eq", "rmMix", "rmFreq", "cut", "res", "reverb", "reverbB", "stereoDelay", "pogo",
+        "resamplingQuality"
     };
     for (auto* id : precomputeIds)
         apvts.addParameterListener(id, this);
+
+    syncInstanceChokeRegistration();
 }
 
 FLSamplerAudioProcessor::~FLSamplerAudioProcessor()
 {
+    cancelPendingUpdate();
+    fls::GlobalChokeBus::instance().unregisterInstance(reinterpret_cast<uintptr_t>(this));
     const char* precomputeIds[] = {
         "removeDc", "normalize", "reverse", "reversePol", "fadeStereo", "swapStereo",
         "smpStart", "length", "fadeIn", "fadeOut", "crossfade", "trim",
-        "boost", "clip", "eq", "rmMix", "rmFreq", "cut", "res", "reverb", "reverbB", "stereoDelay", "pogo"
+        "boost", "clip", "eq", "rmMix", "rmFreq", "cut", "res", "reverb", "reverbB", "stereoDelay", "pogo",
+        "resamplingQuality"
     };
     for (auto* id : precomputeIds)
         apvts.removeParameterListener(id, this);
+}
+
+int FLSamplerAudioProcessor::allocateNextFreeSelfCutTrackGroup() noexcept
+{
+    const int g = fls::GlobalChokeBus::instance().allocateNextFreeGroupForInstance(reinterpret_cast<uintptr_t>(this));
+    mixerTrack.store(g, std::memory_order_relaxed);
+    cutGroup.store(g, std::memory_order_relaxed);
+    cutByGroup.store(g, std::memory_order_relaxed);
+    return g;
+}
+
+void FLSamplerAudioProcessor::syncInstanceChokeRegistration() noexcept
+{
+    fls::GlobalChokeBus::instance().registerOrUpdateInstance(
+        reinterpret_cast<uintptr_t>(this),
+        mixerTrack.load(std::memory_order_relaxed),
+        cutGroup.load(std::memory_order_relaxed),
+        cutByGroup.load(std::memory_order_relaxed));
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout FLSamplerAudioProcessor::createParameterLayout()
@@ -86,6 +110,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout FLSamplerAudioProcessor::cre
             "e2 mono",
             "e2 speech"
         }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>("resamplingQuality", "Resampling Quality",
+        juce::StringArray{
+            "2-point linear",
+            "6-point Hermite",
+            "16-point sinc",
+            "24-point sinc",
+            "32-point sinc",
+            "64-point sinc",
+            "128-point sinc",
+            "256-point sinc",
+            "512-point sinc"
+        }, 3));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("formantShift", "Formant Shift",
         juce::NormalisableRange<float>(-12.0f, 12.0f, 0.1f), 0.0f));
 
@@ -132,20 +168,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout FLSamplerAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterFloat>("pogo", "Pogo Pitch Bend",
         juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f));
 
-    // Tab 2: Envelope / Instrument Settings (InsSheet)
+    // Tab 2: Envelope / Instrument Settings (InsSheet) - In FL Studio Sampler, Volume Envelope is OFF by default (one-shot playback)!
     params.push_back(std::make_unique<juce::AudioParameterBool>("volEnvOn", "Volume Envelope Enabled", false));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("envDelay", "Envelope Delay",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("envAttack", "Envelope Attack",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.02f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("envHold", "Envelope Hold",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("envHold", "Envelope Hold",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("envDecay", "Envelope Decay",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.35f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("envSustain", "Envelope Sustain",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.80f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("envRelease", "Envelope Release",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.20f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.32f));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>("lfoAmt", "Pitch LFO Amount",
         juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f));
@@ -174,12 +210,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout FLSamplerAudioProcessor::cre
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>("arpDir", "Arpeggiator Direction",
-        juce::StringArray{ "Off", "Up", "Down", "Up-Down (Bounce)", "Random" }, 0));
+        juce::StringArray{ "Off", "Up", "Down", "Up-Down (Bounce)", "Sticky", "Random" }, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("arpTime", "Arpeggiator Time",
         juce::NormalisableRange<float>(0.03f, 0.50f, 0.001f), 0.125f));
-    params.push_back(std::make_unique<juce::AudioParameterInt>("arpRange", "Arpeggiator Range (Octaves)", 1, 4, 1));
+    params.push_back(std::make_unique<juce::AudioParameterInt>("arpRange", "Arpeggiator Range (Octaves)", 1, 8, 1));
 
-    params.push_back(std::make_unique<juce::AudioParameterInt>("echoCount", "Echo Count", 0, 10, 0));
+    params.push_back(std::make_unique<juce::AudioParameterInt>("echoCount", "Echo Count", 0, 16, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("echoFeed", "Echo Feedback",
         juce::NormalisableRange<float>(0.0f, 0.95f, 0.001f), 0.45f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("echoTime", "Echo Time",
@@ -189,9 +225,41 @@ juce::AudioProcessorValueTreeState::ParameterLayout FLSamplerAudioProcessor::cre
     return { params.begin(), params.end() };
 }
 
-void FLSamplerAudioProcessor::parameterChanged(const juce::String&, float)
+void FLSamplerAudioProcessor::parameterChanged(const juce::String& paramId, float newValue)
 {
+    if (paramId == "crossfade" && newValue > 0.001f)
+    {
+        if (auto* pLoop = apvts.getParameter("useLoopPoints"))
+        {
+            if (pLoop->getValue() < 0.5f)
+            {
+                if (juce::MessageManager::getInstanceWithoutCreating() != nullptr
+                    && juce::MessageManager::getInstanceWithoutCreating()->isThisTheMessageThread())
+                {
+                    pLoop->setValueNotifyingHost(1.0f);
+                }
+                else
+                {
+                    pendingAutoEnableLoopPoints.store(true, std::memory_order_release);
+                }
+            }
+        }
+    }
     needsPrecompute.store(true, std::memory_order_release);
+    triggerAsyncUpdate();
+}
+
+void FLSamplerAudioProcessor::handleAsyncUpdate()
+{
+    if (pendingAutoEnableLoopPoints.exchange(false, std::memory_order_acq_rel))
+    {
+        if (auto* pLoop = apvts.getParameter("useLoopPoints"))
+        {
+            if (pLoop->getValue() < 0.5f)
+                pLoop->setValueNotifyingHost(1.0f);
+        }
+    }
+    flushPrecomputeIfNeeded();
 }
 
 fls::PrecomputedSettings FLSamplerAudioProcessor::gatherPrecomputedSettings() const
@@ -222,6 +290,7 @@ fls::PrecomputedSettings FLSamplerAudioProcessor::gatherPrecomputedSettings() co
     s.reverbB         = apvts.getRawParameterValue("reverbB")->load() > 0.5f;
     s.stereoDelay     = apvts.getRawParameterValue("stereoDelay")->load();
     s.pogo            = apvts.getRawParameterValue("pogo")->load();
+    s.resamplingQuality = (int)std::round(apvts.getRawParameterValue("resamplingQuality")->load());
     return s;
 }
 
@@ -239,15 +308,23 @@ fls::SamplerRuntimeParams FLSamplerAudioProcessor::gatherRuntimeParams() const
     p.declickMode     = (int)apvts.getRawParameterValue("declickMode")->load();
 
     p.startOffset     = apvts.getRawParameterValue("startOffset")->load();
-    p.loopStart       = apvts.getRawParameterValue("loopStart")->load();
-    p.loopEnd         = apvts.getRawParameterValue("loopEnd")->load();
-    p.useLoopPoints   = apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f;
+    const float xfadeVal = apvts.getRawParameterValue("crossfade")->load();
+    const float xfLoopStart = computedCrossfadeLoopStart.load(std::memory_order_relaxed);
+    const bool hasXfadeLoop = (xfadeVal > 0.001f && xfLoopStart >= 0.0f);
+    const float rawLoopStart = apvts.getRawParameterValue("loopStart")->load();
+    const float rawLoopEnd   = apvts.getRawParameterValue("loopEnd")->load();
+    const bool hasRedLoopMarks = hasXfadeLoop || (rawLoopStart > 0.0005f) || (rawLoopEnd < 0.9995f);
+
+    p.loopStart       = hasXfadeLoop ? xfLoopStart : rawLoopStart;
+    p.loopEnd         = hasXfadeLoop ? 1.0f        : rawLoopEnd;
+    p.useLoopPoints   = ((apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f) || hasXfadeLoop) && hasRedLoopMarks;
     p.pingPongLoop    = apvts.getRawParameterValue("pingPongLoop")->load() > 0.5f;
 
     p.stretchPitch    = apvts.getRawParameterValue("stretchPitch")->load();
     p.stretchMul      = apvts.getRawParameterValue("stretchMul")->load();
     p.stretchTime     = apvts.getRawParameterValue("stretchTime")->load();
-    p.stretchMode     = (int)apvts.getRawParameterValue("stretchMode")->load();
+    p.stretchMode     = (int)std::round(apvts.getRawParameterValue("stretchMode")->load());
+    p.resamplingQuality = (int)std::round(apvts.getRawParameterValue("resamplingQuality")->load());
     p.formantShift    = apvts.getRawParameterValue("formantShift")->load();
     p.hostBpm         = currentHostBpm.load(std::memory_order_relaxed);
     p.embeddedLoopBpm = detectedSampleBpm.load(std::memory_order_relaxed);
@@ -262,12 +339,6 @@ fls::SamplerRuntimeParams FLSamplerAudioProcessor::gatherRuntimeParams() const
     p.targetEnvs[1].decay    = apvts.getRawParameterValue("envDecay")->load();
     p.targetEnvs[1].sustain  = apvts.getRawParameterValue("envSustain")->load();
     p.targetEnvs[1].release  = apvts.getRawParameterValue("envRelease")->load();
-
-    p.targetLfos[4].delay    = lfoDelayAmt.load(std::memory_order_relaxed);
-    p.targetLfos[4].attack   = lfoAttackAmt.load(std::memory_order_relaxed);
-    p.targetLfos[4].amount   = apvts.getRawParameterValue("lfoAmt")->load();
-    p.targetLfos[4].speed    = apvts.getRawParameterValue("lfoSpeed")->load();
-    p.targetLfos[4].shape    = lfoShapeIdx.load(std::memory_order_relaxed);
 
     p.filterModX      = apvts.getRawParameterValue("filterModX")->load();
     p.filterModY      = apvts.getRawParameterValue("filterModY")->load();
@@ -304,6 +375,7 @@ fls::SamplerRuntimeParams FLSamplerAudioProcessor::gatherRuntimeParams() const
 
     p.arpDir          = (int)apvts.getRawParameterValue("arpDir")->load();
     p.arpTime         = apvts.getRawParameterValue("arpTime")->load();
+    p.arpGate         = arpGateAmt.load(std::memory_order_relaxed);
     p.arpRange        = (int)apvts.getRawParameterValue("arpRange")->load();
     p.arpRepeat       = arpRepeatCount.load(std::memory_order_relaxed);
     p.arpSlide        = arpSlideOn.load(std::memory_order_relaxed);
@@ -342,6 +414,10 @@ void FLSamplerAudioProcessor::rebuildPrecomputedBuffer()
     double loopEndNorm   = apvts.getRawParameterValue("loopEnd")->load();
     auto settings = gatherPrecomputedSettings();
     fls::PrecomputedEffects::process(rawSampleBuffer, processedSampleBuffer, loadedSampleRate, settings, loopStartNorm, loopEndNorm);
+    if (settings.crossfade > 0.001f)
+        computedCrossfadeLoopStart.store((float)loopStartNorm, std::memory_order_relaxed);
+    else
+        computedCrossfadeLoopStart.store(-1.0f, std::memory_order_relaxed);
     waveformRevision.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -420,6 +496,7 @@ bool FLSamplerAudioProcessor::loadSampleFromFile(const juce::File& file)
         rawSampleBuffer.makeCopyOf(temp);
         loadedSampleRate = sr;
         currentSampleFile = file;
+        cachedFileName = file.getFileName();
         sliceMarkers = std::move(detectedSlices);
         recentSampleFiles.removeString(file.getFullPathName());
         recentSampleFiles.insert(0, file.getFullPathName());
@@ -439,6 +516,7 @@ void FLSamplerAudioProcessor::clearSample()
     processedSampleBuffer.setSize(2, 0);
     sliceMarkers.clear();
     currentSampleFile = juce::File();
+    cachedFileName = "(none)";
     sampleLoaded.store(false, std::memory_order_relaxed);
     waveformRevision.fetch_add(1, std::memory_order_relaxed);
 }
@@ -594,23 +672,28 @@ void FLSamplerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
 
+    bool hostStoppedJustNow = false;
     if (auto* ph = getPlayHead())
     {
         if (auto pos = ph->getPosition())
         {
             if (auto bpm = pos->getBpm(); bpm.hasValue() && *bpm > 20.0)
                 currentHostBpm.store(*bpm, std::memory_order_relaxed);
+
+            const bool isPlayingNow = pos->getIsPlaying();
+            const bool prevPlaying  = wasHostPlaying.exchange(isPlayingNow, std::memory_order_relaxed);
+            if (prevPlaying && !isPlayingNow)
+                hostStoppedJustNow = true;
         }
     }
-
-    if (needsPrecompute.exchange(false, std::memory_order_acq_rel))
-        rebuildPrecomputedBuffer();
 
     const juce::ScopedTryLock stl(sampleLock);
     if (!stl.isLocked() || processedSampleBuffer.getNumSamples() <= 1)
         return;
 
     auto runtimeParams = gatherRuntimeParams();
+    if (hostStoppedJustNow)
+        samplerEngine.softStopAllVoices(runtimeParams.declickMode);
 
     // Check UI preview triggers
     int uiNoteOn = pendingNoteOn.exchange(-1, std::memory_order_relaxed);
@@ -624,9 +707,21 @@ void FLSamplerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
     if (uiNoteOff >= 0)
         samplerEngine.noteOff(uiNoteOff, runtimeParams);
 
-    // Process incoming MIDI messages (Piano Roll / Keyboard / Controllers / MPE Slide Notes)
+    // Process incoming MIDI messages with sample-accurate sub-block splitting!
+    // This ensures rapid-fire MIDI notes within the same audio buffer never stack at sample 0 or get swallowed.
+    const int totalSamples = buffer.getNumSamples();
+    int currentSample = 0;
+
     for (const auto metadata : midiMessages)
     {
+        const int eventSample = juce::jlimit(0, totalSamples, metadata.samplePosition);
+        if (eventSample > currentSample)
+        {
+            samplerEngine.renderBlock(buffer, processedSampleBuffer, loadedSampleRate, runtimeParams,
+                                      currentSample, eventSample - currentSample);
+            currentSample = eventSample;
+        }
+
         const auto msg = metadata.getMessage();
         if (msg.isNoteOn())
         {
@@ -665,11 +760,15 @@ void FLSamplerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
         {
-            samplerEngine.resetAllVoices();
+            samplerEngine.softStopAllVoices(runtimeParams.declickMode);
         }
     }
 
-    samplerEngine.renderBlock(buffer, processedSampleBuffer, loadedSampleRate, runtimeParams);
+    if (currentSample < totalSamples)
+    {
+        samplerEngine.renderBlock(buffer, processedSampleBuffer, loadedSampleRate, runtimeParams,
+                                  currentSample, totalSamples - currentSample);
+    }
 }
 
 void FLSamplerAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
@@ -701,6 +800,7 @@ void FLSamplerAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.setProperty("lfoDelayAmt", lfoDelayAmt.load(), nullptr);
     state.setProperty("lfoAttackAmt", lfoAttackAmt.load(), nullptr);
     state.setProperty("lfoShapeIdx", lfoShapeIdx.load(), nullptr);
+    state.setProperty("arpGateAmt", arpGateAmt.load(), nullptr);
     state.setProperty("arpRepeatCount", arpRepeatCount.load(), nullptr);
     state.setProperty("arpSlideOn", arpSlideOn.load(), nullptr);
     state.setProperty("arpChordMode", arpChordMode.load(), nullptr);
@@ -716,27 +816,27 @@ void FLSamplerAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     for (int i = 0; i < 5; ++i)
     {
         const juce::String pfx = "env" + juce::String(i) + "_";
-        state.setProperty(pfx + "en", targetEnvs[(size_t)i].enabled, nullptr);
-        state.setProperty(pfx + "del", targetEnvs[(size_t)i].delay, nullptr);
-        state.setProperty(pfx + "att", targetEnvs[(size_t)i].attack, nullptr);
-        state.setProperty(pfx + "hld", targetEnvs[(size_t)i].hold, nullptr);
-        state.setProperty(pfx + "dec", targetEnvs[(size_t)i].decay, nullptr);
-        state.setProperty(pfx + "sus", targetEnvs[(size_t)i].sustain, nullptr);
-        state.setProperty(pfx + "rel", targetEnvs[(size_t)i].release, nullptr);
-        state.setProperty(pfx + "amt", targetEnvs[(size_t)i].amount, nullptr);
-        state.setProperty(pfx + "tA", targetEnvs[(size_t)i].attTension, nullptr);
-        state.setProperty(pfx + "tD", targetEnvs[(size_t)i].decTension, nullptr);
-        state.setProperty(pfx + "tR", targetEnvs[(size_t)i].relTension, nullptr);
-        state.setProperty(pfx + "ts", targetEnvs[(size_t)i].tempoSync, nullptr);
+        state.setProperty(pfx + "en",  targetEnvs[(size_t)i].enabled.load(), nullptr);
+        state.setProperty(pfx + "del", targetEnvs[(size_t)i].delay.load(), nullptr);
+        state.setProperty(pfx + "att", targetEnvs[(size_t)i].attack.load(), nullptr);
+        state.setProperty(pfx + "hld", targetEnvs[(size_t)i].hold.load(), nullptr);
+        state.setProperty(pfx + "dec", targetEnvs[(size_t)i].decay.load(), nullptr);
+        state.setProperty(pfx + "sus", targetEnvs[(size_t)i].sustain.load(), nullptr);
+        state.setProperty(pfx + "rel", targetEnvs[(size_t)i].release.load(), nullptr);
+        state.setProperty(pfx + "amt", targetEnvs[(size_t)i].amount.load(), nullptr);
+        state.setProperty(pfx + "tA",  targetEnvs[(size_t)i].attTension.load(), nullptr);
+        state.setProperty(pfx + "tD",  targetEnvs[(size_t)i].decTension.load(), nullptr);
+        state.setProperty(pfx + "tR",  targetEnvs[(size_t)i].relTension.load(), nullptr);
+        state.setProperty(pfx + "ts",  targetEnvs[(size_t)i].tempoSync.load(), nullptr);
 
         const juce::String lpfx = "lfo" + juce::String(i) + "_";
-        state.setProperty(lpfx + "del", targetLfos[(size_t)i].delay, nullptr);
-        state.setProperty(lpfx + "att", targetLfos[(size_t)i].attack, nullptr);
-        state.setProperty(lpfx + "amt", targetLfos[(size_t)i].amount, nullptr);
-        state.setProperty(lpfx + "spd", targetLfos[(size_t)i].speed, nullptr);
-        state.setProperty(lpfx + "shp", targetLfos[(size_t)i].shape, nullptr);
-        state.setProperty(lpfx + "ts",  targetLfos[(size_t)i].tempoSync, nullptr);
-        state.setProperty(lpfx + "gl",  targetLfos[(size_t)i].globalPhase, nullptr);
+        state.setProperty(lpfx + "del", targetLfos[(size_t)i].delay.load(), nullptr);
+        state.setProperty(lpfx + "att", targetLfos[(size_t)i].attack.load(), nullptr);
+        state.setProperty(lpfx + "amt", targetLfos[(size_t)i].amount.load(), nullptr);
+        state.setProperty(lpfx + "spd", targetLfos[(size_t)i].speed.load(), nullptr);
+        state.setProperty(lpfx + "shp", targetLfos[(size_t)i].shape.load(), nullptr);
+        state.setProperty(lpfx + "ts",  targetLfos[(size_t)i].tempoSync.load(), nullptr);
+        state.setProperty(lpfx + "gl",  targetLfos[(size_t)i].globalPhase.load(), nullptr);
     }
 
     // Serialize custom slice markers and recent files
@@ -784,77 +884,86 @@ void FLSamplerAudioProcessor::setStateInformation(const void* data, int sizeInBy
         loadRegions.store((bool)vt.getProperty("loadRegions", true));
         loadSliceMarkers.store((bool)vt.getProperty("loadSliceMarkers", false));
         zeroCrossSnap.store((bool)vt.getProperty("zeroCrossSnap", true));
-        mixerTrack.store((int)vt.getProperty("mixerTrack", 0));
-        cutGroup.store((int)vt.getProperty("cutGroup", 0));
-        cutByGroup.store((int)vt.getProperty("cutByGroup", 0));
-        keyRegionLow.store((int)vt.getProperty("keyRegionLow", 0));
-        keyRegionHigh.store((int)vt.getProperty("keyRegionHigh", 127));
+        mixerTrack.store(juce::jlimit(0, 125, (int)vt.getProperty("mixerTrack", 0)));
+        cutGroup.store(juce::jlimit(0, 99, (int)vt.getProperty("cutGroup", 0)));
+        cutByGroup.store(juce::jlimit(0, 99, (int)vt.getProperty("cutByGroup", 0)));
+        syncInstanceChokeRegistration();
+        const int loadedLo = juce::jlimit(0, 127, (int)vt.getProperty("keyRegionLow", 0));
+        const int loadedHi = juce::jlimit(loadedLo, 127, (int)vt.getProperty("keyRegionHigh", 127));
+        keyRegionLow.store(loadedLo);
+        keyRegionHigh.store(loadedHi);
         addToKey.store((bool)vt.getProperty("addToKey", false));
         fullPorta.store((bool)vt.getProperty("fullPorta", false));
-        shiftTimeAmt.store((float)vt.getProperty("shiftTimeAmt", 0.0f));
-        swingMulAmt.store((float)vt.getProperty("swingMulAmt", 0.0f));
+        shiftTimeAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("shiftTimeAmt", 0.0f)));
+        swingMulAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("swingMulAmt", 0.0f)));
         trackingKeyMode.store((bool)vt.getProperty("trackingKeyMode", true));
-        lvlPanOffset.store((float)vt.getProperty("lvlPanOffset", 0.0f));
-        lvlVolOffset.store((float)vt.getProperty("lvlVolOffset", 0.78f));
-        lvlModXOffset.store((float)vt.getProperty("lvlModXOffset", 0.0f));
-        lvlModYOffset.store((float)vt.getProperty("lvlModYOffset", 0.0f));
-        trackPanAmt.store((float)vt.getProperty("trackPanAmt", 0.0f));
-        trackModXAmt.store((float)vt.getProperty("trackModXAmt", 0.0f));
-        trackModYAmt.store((float)vt.getProperty("trackModYAmt", 0.0f));
-        trackMidNote.store((int)vt.getProperty("trackMidNote", 60));
-        lfoDelayAmt.store((float)vt.getProperty("lfoDelayAmt", 0.0f));
-        lfoAttackAmt.store((float)vt.getProperty("lfoAttackAmt", 0.35f));
-        lfoShapeIdx.store((int)vt.getProperty("lfoShapeIdx", 0));
-        arpRepeatCount.store((int)vt.getProperty("arpRepeatCount", 1));
+        lvlPanOffset.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("lvlPanOffset", 0.0f)));
+        lvlVolOffset.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("lvlVolOffset", 0.78f)));
+        lvlModXOffset.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("lvlModXOffset", 0.0f)));
+        lvlModYOffset.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("lvlModYOffset", 0.0f)));
+        trackPanAmt.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("trackPanAmt", 0.0f)));
+        trackModXAmt.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("trackModXAmt", 0.0f)));
+        trackModYAmt.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("trackModYAmt", 0.0f)));
+        trackMidNote.store(juce::jlimit(0, 127, (int)vt.getProperty("trackMidNote", 60)));
+        lfoDelayAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("lfoDelayAmt", 0.0f)));
+        lfoAttackAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("lfoAttackAmt", 0.35f)));
+        lfoShapeIdx.store(juce::jlimit(0, 2, (int)vt.getProperty("lfoShapeIdx", 0)));
+        arpGateAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("arpGateAmt", 1.0f)));
+        arpRepeatCount.store(juce::jlimit(1, 8, (int)vt.getProperty("arpRepeatCount", 1)));
         arpSlideOn.store((bool)vt.getProperty("arpSlideOn", false));
-        arpChordMode.store((int)vt.getProperty("arpChordMode", 0));
-        echoPanAmt.store((float)vt.getProperty("echoPanAmt", 0.0f));
-        echoModXAmt.store((float)vt.getProperty("echoModXAmt", 0.65f));
-        echoModYAmt.store((float)vt.getProperty("echoModYAmt", 0.25f));
-        echoPitchAmt.store((float)vt.getProperty("echoPitchAmt", 0.0f));
+        arpChordMode.store(juce::jlimit(0, 6, (int)vt.getProperty("arpChordMode", 1)));
+        echoPanAmt.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty("echoPanAmt", 0.0f)));
+        echoModXAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("echoModXAmt", 0.65f)));
+        echoModYAmt.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty("echoModYAmt", 0.25f)));
+        echoPitchAmt.store(juce::jlimit(-12.0f, 12.0f, (float)vt.getProperty("echoPitchAmt", 0.0f)));
         echoFatModeOn.store((bool)vt.getProperty("echoFatModeOn", false));
 
         if (vt.hasProperty("skinMode"))
             fls::FLColors::setSkinMode((int)vt.getProperty("skinMode", 0));
         else
-            fls::FLColors::setSkinMode((bool)vt.getProperty("isAbletonSkin", false) ? 1 : 0);
+            fls::FLColors::setSkinMode((bool)vt.getProperty("isAbletonSkin", false) ? 2 : 0);
+
+        stateRevision.fetch_add(1, std::memory_order_relaxed);
 
         for (int i = 0; i < 5; ++i)
         {
             const juce::String pfx = "env" + juce::String(i) + "_";
             if (vt.hasProperty(pfx + "en"))
             {
-                targetEnvs[(size_t)i].enabled    = (bool)vt.getProperty(pfx + "en");
-                targetEnvs[(size_t)i].delay      = (float)vt.getProperty(pfx + "del");
-                targetEnvs[(size_t)i].attack     = (float)vt.getProperty(pfx + "att");
-                targetEnvs[(size_t)i].hold       = (float)vt.getProperty(pfx + "hld");
-                targetEnvs[(size_t)i].decay      = (float)vt.getProperty(pfx + "dec");
-                targetEnvs[(size_t)i].sustain    = (float)vt.getProperty(pfx + "sus");
-                targetEnvs[(size_t)i].release    = (float)vt.getProperty(pfx + "rel");
-                targetEnvs[(size_t)i].amount     = (float)vt.getProperty(pfx + "amt");
-                targetEnvs[(size_t)i].attTension = (float)vt.getProperty(pfx + "tA");
-                targetEnvs[(size_t)i].decTension = (float)vt.getProperty(pfx + "tD");
-                targetEnvs[(size_t)i].relTension = (float)vt.getProperty(pfx + "tR");
-                targetEnvs[(size_t)i].tempoSync  = (bool)vt.getProperty(pfx + "ts");
+                targetEnvs[(size_t)i].enabled.store((bool)vt.getProperty(pfx + "en"), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].delay.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "del")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].attack.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "att")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].hold.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "hld")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].decay.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "dec")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].sustain.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "sus")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].release.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(pfx + "rel")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].amount.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty(pfx + "amt")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].attTension.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty(pfx + "tA")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].decTension.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty(pfx + "tD")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].relTension.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty(pfx + "tR")), std::memory_order_relaxed);
+                targetEnvs[(size_t)i].tempoSync.store((bool)vt.getProperty(pfx + "ts"), std::memory_order_relaxed);
             }
             const juce::String lpfx = "lfo" + juce::String(i) + "_";
             if (vt.hasProperty(lpfx + "spd"))
             {
-                targetLfos[(size_t)i].delay       = (float)vt.getProperty(lpfx + "del");
-                targetLfos[(size_t)i].attack      = (float)vt.getProperty(lpfx + "att");
-                targetLfos[(size_t)i].amount      = (float)vt.getProperty(lpfx + "amt");
-                targetLfos[(size_t)i].speed       = (float)vt.getProperty(lpfx + "spd");
-                targetLfos[(size_t)i].shape       = (int)vt.getProperty(lpfx + "shp");
-                targetLfos[(size_t)i].tempoSync   = (bool)vt.getProperty(lpfx + "ts");
-                targetLfos[(size_t)i].globalPhase = (bool)vt.getProperty(lpfx + "gl");
+                targetLfos[(size_t)i].delay.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(lpfx + "del")), std::memory_order_relaxed);
+                targetLfos[(size_t)i].attack.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(lpfx + "att")), std::memory_order_relaxed);
+                targetLfos[(size_t)i].amount.store(juce::jlimit(-1.0f, 1.0f, (float)vt.getProperty(lpfx + "amt")), std::memory_order_relaxed);
+                targetLfos[(size_t)i].speed.store(juce::jlimit(0.0f, 1.0f, (float)vt.getProperty(lpfx + "spd")), std::memory_order_relaxed);
+                targetLfos[(size_t)i].shape.store(juce::jlimit(0, 2, (int)vt.getProperty(lpfx + "shp")), std::memory_order_relaxed);
+                targetLfos[(size_t)i].tempoSync.store((bool)vt.getProperty(lpfx + "ts"), std::memory_order_relaxed);
+                targetLfos[(size_t)i].globalPhase.store((bool)vt.getProperty(lpfx + "gl"), std::memory_order_relaxed);
             }
         }
 
-        juce::String recentPipe = vt.getProperty("recentFilesPipe", "").toString();
-        if (recentPipe.isNotEmpty())
         {
-            recentSampleFiles.clear();
-            recentSampleFiles.addTokens(recentPipe, "|", "");
+            const juce::ScopedLock sl(sampleLock);
+            juce::String recentPipe = vt.getProperty("recentFilesPipe", "").toString();
+            if (recentPipe.isNotEmpty())
+            {
+                recentSampleFiles.clear();
+                recentSampleFiles.addTokens(recentPipe, "|", "");
+            }
         }
 
         juce::String path = vt.getProperty("sampleFilePath", "").toString();
@@ -879,6 +988,7 @@ void FLSamplerAudioProcessor::setStateInformation(const void* data, int sizeInBy
                     const juce::ScopedLock sl(sampleLock);
                     rawSampleBuffer.makeCopyOf(temp);
                     loadedSampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 44100.0;
+                    cachedFileName = path.isNotEmpty() ? juce::File(path).getFileName() : "Embedded.wav";
                     sampleLoaded.store(true, std::memory_order_relaxed);
                     rebuildPrecomputedBuffer();
                 }

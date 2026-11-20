@@ -19,7 +19,6 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
       wavScope(p)
 {
     setLookAndFeel(&flLookAndFeel);
-    privateSkinBg = juce::ImageCache::getFromMemory(BinaryData::Skin_jpg, BinaryData::Skin_jpgSize);
 
     // Make contentCanvas pass mouse clicks to the editor when clicking custom-painted regions (tabs, keyboard, etc.)
     contentCanvas.setInterceptsMouseClicks(false, true);
@@ -53,6 +52,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     trackBox.onValueChanged = [this](int v)
     {
         audioProcessor.mixerTrack.store(v, std::memory_order_relaxed);
+        audioProcessor.syncInstanceChokeRegistration();
         setHintText("Choke Link Group (TRACK): " + (v == 0 ? juce::String("Off (---)") : ("Group #" + juce::String(v) + " (cuts linked instances)")));
     };
 
@@ -86,18 +86,37 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     comboAttachments.push_back(std::make_unique<ComboAttachment>(audioProcessor.apvts, "declickMode", declickCombo));
 
     // Playback Panel
-    setupKnob(startOffsetKnob, "Sample start offset", 0.0);
-    setupKnob(loopStartKnob,   "Loop start",          0.0);
-    setupKnob(loopEndKnob,     "Loop end",            1.0);
+    setupKnob(startOffsetKnob, "Sample start offset", 0.0, false, false, true);
+    setupKnob(loopStartKnob,   "Loop start",          0.0, false, false, true);
+    setupKnob(loopEndKnob,     "Loop end",            1.0, false, false, true);
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "startOffset", startOffsetKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "loopStart", loopStartKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "loopEnd", loopEndKnob));
     startOffsetKnob.setDefaultResetValue(0.0);
     loopStartKnob.setDefaultResetValue(0.0);
     loopEndKnob.setDefaultResetValue(1.0);
+    loopStartKnob.onValueChange = [this]()
+    {
+        if (loopStartKnob.getValue() > 0.0005 && !useLoopPointsBtn.getToggleState())
+        {
+            if (auto* p = audioProcessor.apvts.getParameter("useLoopPoints"))
+                p->setValueNotifyingHost(1.0f);
+        }
+    };
+    loopEndKnob.onValueChange = [this]()
+    {
+        if (loopEndKnob.getValue() < 0.9995 && !useLoopPointsBtn.getToggleState())
+        {
+            if (auto* p = audioProcessor.apvts.getParameter("useLoopPoints"))
+                p->setValueNotifyingHost(1.0f);
+        }
+    };
 
+    useLoopPointsBtn.setButtonText("Use loop points");
     contentCanvas.addAndMakeVisible(useLoopPointsBtn);
     contentCanvas.addAndMakeVisible(pingPongLoopBtn);
+    useLoopPointsBtn.setBounds(162, 234, 102, 18);
+    pingPongLoopBtn.setBounds(162, 258, 102, 18);
     buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "useLoopPoints", useLoopPointsBtn));
     buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "pingPongLoop", pingPongLoopBtn));
 
@@ -105,7 +124,14 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     setupKnob(stretchPitchKnob, "Time stretch pitch",      0.0, true);
     setupKnob(stretchMulKnob,   "Time stretch multiplier", 1.0);
     setupKnob(stretchTimeKnob,  "Time stretch time",       0.0);
-    setupKnob(formantShiftKnob, "Formant shift (semitones)", 0.0, true, false, true);
+    formantShiftKnob.setName("Formant shift (semitones)");
+    formantShiftKnob.onHintChanged = [this](const juce::String& h) { setHintText(h); };
+    formantShiftKnob.setSliderStyle(juce::Slider::LinearHorizontal);
+    formantShiftKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    formantShiftKnob.setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    formantShiftKnob.getProperties().set("flBipolar", true);
+    formantShiftKnob.getProperties().set("flRedSlider", true);
+    contentCanvas.addAndMakeVisible(formantShiftKnob);
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "stretchPitch", stretchPitchKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "stretchMul", stretchMulKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "stretchTime", stretchTimeKnob));
@@ -133,6 +159,15 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
         "e2 speech"
     }, 1);
     comboAttachments.push_back(std::make_unique<ComboAttachment>(audioProcessor.apvts, "stretchMode", stretchModeCombo));
+    stretchModeCombo.onChange = [this]()
+    {
+        if (currentSheet == 0)
+        {
+            const bool isStretchPro = (stretchModeCombo.getSelectedItemIndex() == 4);
+            formantShiftKnob.setVisible(isStretchPro);
+            repaint();
+        }
+    };
 
     // Precomputed Effects (Standard - Wrench sub-tab)
     contentCanvas.addAndMakeVisible(removeDcBtn);
@@ -148,12 +183,12 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "fadeStereo", fadeStereoBtn));
     buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "swapStereo", swapStereoBtn));
 
-    setupKnob(smpStartKnob,  "Sample start (precomputed)", 0.0);
+    setupKnob(smpStartKnob,  "Sample start (precomputed)", 0.0, false, false, true);
     setupKnob(lengthKnob,    "Sample length (precomputed)", 1.0, false, false, true); // Orange ring on LENGTH matching screenshot 1
-    setupKnob(fadeInKnob,    "Quick fade in",  0.0);
-    setupKnob(fadeOutKnob,   "Quick fade out", 0.0);
-    setupKnob(crossfadeKnob, "Loop crossfade", 0.0);
-    setupKnob(trimKnob,      "Trim threshold", 0.0);
+    setupKnob(fadeInKnob,    "Quick fade in",  0.0, false, false, true);
+    setupKnob(fadeOutKnob,   "Quick fade out", 0.0, false, false, true);
+    setupKnob(crossfadeKnob, "Loop crossfade", 0.0, false, false, true);
+    setupKnob(trimKnob,      "Trim threshold", 0.0, false, false, true);
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "smpStart", smpStartKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "length", lengthKnob));
     sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "fadeIn", fadeInKnob));
@@ -205,29 +240,46 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
 
     // ==================== TAB 2: ENVELOPE / INSTRUMENT SETTINGS ====================
     contentCanvas.addAndMakeVisible(volEnvOnBtn);
-    buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "volEnvOn", volEnvOnBtn));
 
     setupKnob(envDelayKnob,   "Envelope delay",   0.0);
-    setupKnob(envAttackKnob,  "Envelope attack",  0.02);
-    setupKnob(envHoldKnob,    "Envelope hold",    0.0);
-    setupKnob(envDecayKnob,   "Envelope decay",   0.35);
-    setupKnob(envSustainKnob, "Envelope sustain", 0.80);
-    setupKnob(envReleaseKnob, "Envelope release", 0.20);
+    setupKnob(envAttackKnob,  "Envelope attack",  0.0);
+    setupKnob(envHoldKnob,    "Envelope hold",    0.28);
+    setupKnob(envDecayKnob,   "Envelope decay",   0.0);
+    setupKnob(envSustainKnob, "Envelope sustain", 0.0);
+    setupKnob(envReleaseKnob, "Envelope release", 0.0);
     setupKnob(envAmountKnob,  "Envelope amount",  0.0, true);
+    envDelayKnob.setRange(0.0, 1.0, 0.001);
+    envAttackKnob.setRange(0.0, 1.0, 0.001);
+    envHoldKnob.setRange(0.0, 1.0, 0.001);
+    envDecayKnob.setRange(0.0, 1.0, 0.001);
+    envSustainKnob.setRange(0.0, 1.0, 0.001);
+    envReleaseKnob.setRange(0.0, 1.0, 0.001);
     envAmountKnob.setRange(-1.0, 1.0, 0.01);
     envAmountKnob.setValue(0.0);
     envAmountKnob.setDefaultResetValue(0.0);
-    envAmountKnob.onValueChange = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].amount = (float)envAmountKnob.getValue(); };
+    envAmountKnob.onValueChange = [this]()
+    {
+        const float v = (float)envAmountKnob.getValue();
+        auto& te = audioProcessor.targetEnvs[(size_t)currentInsTarget];
+        te.amount = v;
+        if (currentInsTarget >= 2)
+        {
+            const bool shouldEnable = std::abs(v) > 0.005f;
+            te.enabled = shouldEnable;
+            volEnvOnBtn.setToggleState(shouldEnable, juce::dontSendNotification);
+        }
+        repaint();
+    };
 
     setupKnob(envAttTensionKnob, "Attack tension",  0.0,   true);
     envAttTensionKnob.setRange(-1.0, 1.0, 0.01);
     envAttTensionKnob.setValue(0.0);
     envAttTensionKnob.setDefaultResetValue(0.0);
     envAttTensionKnob.onValueChange = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].attTension = (float)envAttTensionKnob.getValue(); repaint(); };
-    setupKnob(envDecTensionKnob, "Decay tension",  -0.35,  true);
+    setupKnob(envDecTensionKnob, "Decay tension",   0.0,   true);
     envDecTensionKnob.setRange(-1.0, 1.0, 0.01);
-    envDecTensionKnob.setValue(-0.35);
-    envDecTensionKnob.setDefaultResetValue(-0.35);
+    envDecTensionKnob.setValue(0.0);
+    envDecTensionKnob.setDefaultResetValue(0.0);
     envDecTensionKnob.onValueChange = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].decTension = (float)envDecTensionKnob.getValue(); repaint(); };
     setupKnob(envRelTensionKnob, "Release tension", -0.45, true);
     envRelTensionKnob.setRange(-1.0, 1.0, 0.01);
@@ -238,25 +290,22 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     contentCanvas.addAndMakeVisible(envTempoBtn);
     envTempoBtn.onClick = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].tempoSync = envTempoBtn.getToggleState(); };
 
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envDelay", envDelayKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envAttack", envAttackKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envHold", envHoldKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envDecay", envDecayKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envSustain", envSustainKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "envRelease", envReleaseKnob));
-    envDelayKnob.setDefaultResetValue(0.0);
-    envAttackKnob.setDefaultResetValue(0.02);
-    envHoldKnob.setDefaultResetValue(0.0);
-    envDecayKnob.setDefaultResetValue(0.35);
-    envSustainKnob.setDefaultResetValue(0.80);
-    envReleaseKnob.setDefaultResetValue(0.20);
-    envDelayKnob.onValueChange   = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].delay   = (float)envDelayKnob.getValue();   repaint(); };
-    envAttackKnob.onValueChange  = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].attack  = (float)envAttackKnob.getValue();  repaint(); };
-    envHoldKnob.onValueChange    = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].hold    = (float)envHoldKnob.getValue();    repaint(); };
-    envDecayKnob.onValueChange   = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].decay   = (float)envDecayKnob.getValue();   repaint(); };
-    envSustainKnob.onValueChange = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].sustain = (float)envSustainKnob.getValue(); repaint(); };
-    envReleaseKnob.onValueChange = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].release = (float)envReleaseKnob.getValue(); repaint(); };
-    volEnvOnBtn.onClick          = [this]() { audioProcessor.targetEnvs[(size_t)currentInsTarget].enabled = volEnvOnBtn.getToggleState();     repaint(); };
+    auto syncVolEnvParam = [this](const char* paramId, float normVal)
+    {
+        if (currentInsTarget == 1)
+        {
+            if (auto* p = audioProcessor.apvts.getParameter(paramId))
+                p->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, normVal));
+        }
+    };
+
+    envDelayKnob.onValueChange   = [this, syncVolEnvParam]() { float v = (float)envDelayKnob.getValue();   audioProcessor.targetEnvs[(size_t)currentInsTarget].delay   = v; syncVolEnvParam("envDelay",   v); repaint(); };
+    envAttackKnob.onValueChange  = [this, syncVolEnvParam]() { float v = (float)envAttackKnob.getValue();  audioProcessor.targetEnvs[(size_t)currentInsTarget].attack  = v; syncVolEnvParam("envAttack",  v); repaint(); };
+    envHoldKnob.onValueChange    = [this, syncVolEnvParam]() { float v = (float)envHoldKnob.getValue();    audioProcessor.targetEnvs[(size_t)currentInsTarget].hold    = v; syncVolEnvParam("envHold",    v); repaint(); };
+    envDecayKnob.onValueChange   = [this, syncVolEnvParam]() { float v = (float)envDecayKnob.getValue();   audioProcessor.targetEnvs[(size_t)currentInsTarget].decay   = v; syncVolEnvParam("envDecay",   v); repaint(); };
+    envSustainKnob.onValueChange = [this, syncVolEnvParam]() { float v = (float)envSustainKnob.getValue(); audioProcessor.targetEnvs[(size_t)currentInsTarget].sustain = v; syncVolEnvParam("envSustain", v); repaint(); };
+    envReleaseKnob.onValueChange = [this, syncVolEnvParam]() { float v = (float)envReleaseKnob.getValue(); audioProcessor.targetEnvs[(size_t)currentInsTarget].release = v; syncVolEnvParam("envRelease", v); repaint(); };
+    volEnvOnBtn.onClick          = [this, syncVolEnvParam]() { bool on = volEnvOnBtn.getToggleState();     audioProcessor.targetEnvs[(size_t)currentInsTarget].enabled = on; syncVolEnvParam("volEnvOn", on ? 1.0f : 0.0f); repaint(); };
 
     setupKnob(lfoDelayKnob, "LFO delay",  0.0);
     lfoDelayKnob.setRange(0.0, 1.0, 0.01);
@@ -264,7 +313,8 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     lfoDelayKnob.setDefaultResetValue(0.0);
     lfoDelayKnob.onValueChange = [this]() {
         float v = (float)lfoDelayKnob.getValue();
-        audioProcessor.lfoDelayAmt.store(v, std::memory_order_relaxed);
+        if (currentInsTarget == 4)
+            audioProcessor.lfoDelayAmt.store(v, std::memory_order_relaxed);
         audioProcessor.targetLfos[(size_t)currentInsTarget].delay = v;
         repaint();
     };
@@ -274,26 +324,42 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     lfoAttKnob.setDefaultResetValue(0.35);
     lfoAttKnob.onValueChange = [this]() {
         float v = (float)lfoAttKnob.getValue();
-        audioProcessor.lfoAttackAmt.store(v, std::memory_order_relaxed);
+        if (currentInsTarget == 4)
+            audioProcessor.lfoAttackAmt.store(v, std::memory_order_relaxed);
         audioProcessor.targetLfos[(size_t)currentInsTarget].attack = v;
         repaint();
     };
     setupKnob(lfoAmtKnob,   "LFO amount", 0.0, true);
     setupKnob(lfoSpeedKnob, "LFO speed",  0.5);
+    lfoAmtKnob.setRange(-1.0, 1.0, 0.01);
+    lfoSpeedKnob.setRange(0.0, 1.0, 0.001);
     contentCanvas.addAndMakeVisible(lfoTempoBtn);
     contentCanvas.addAndMakeVisible(lfoGlobalBtn);
     lfoTempoBtn.onClick  = [this]() { audioProcessor.targetLfos[(size_t)currentInsTarget].tempoSync   = lfoTempoBtn.getToggleState(); };
     lfoGlobalBtn.onClick = [this]() { audioProcessor.targetLfos[(size_t)currentInsTarget].globalPhase = lfoGlobalBtn.getToggleState(); };
 
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "lfoAmt", lfoAmtKnob));
-    sliderAttachments.push_back(std::make_unique<SliderAttachment>(audioProcessor.apvts, "lfoSpeed", lfoSpeedKnob));
     lfoAmtKnob.setDefaultResetValue(0.0);
     lfoSpeedKnob.setDefaultResetValue(0.5);
-    lfoAmtKnob.onValueChange   = [this]() { audioProcessor.targetLfos[(size_t)currentInsTarget].amount = (float)lfoAmtKnob.getValue(); repaint(); };
+    lfoAmtKnob.onValueChange = [this]()
+    {
+        float v = (float)lfoAmtKnob.getValue();
+        audioProcessor.targetLfos[(size_t)currentInsTarget].amount = v;
+        if (currentInsTarget == 4)
+        {
+            if (auto* p = audioProcessor.apvts.getParameter("lfoAmt"))
+                p->setValueNotifyingHost(p->convertTo0to1(v));
+        }
+        repaint();
+    };
     lfoSpeedKnob.onValueChange = [this]()
     {
         float v = (float)lfoSpeedKnob.getValue();
         audioProcessor.targetLfos[(size_t)currentInsTarget].speed = v;
+        if (currentInsTarget == 4)
+        {
+            if (auto* p = audioProcessor.apvts.getParameter("lfoSpeed"))
+                p->setValueNotifyingHost(p->convertTo0to1(v));
+        }
         if (lfoTempoBtn.getToggleState())
             setHintText("LFO speed (Sync): " + juce::String(fls::SamplerEngine::getMusicalDivisionName(v)));
         repaint();
@@ -391,6 +457,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     gateTimeKnob.setDefaultResetValue(1.0);
 
     // 4. Tracking
+    trackingKeyMode = audioProcessor.trackingKeyMode.load(std::memory_order_relaxed);
     setupKnob(trackPanKnob,  "Tracking pan",   0.0, true);
     trackPanKnob.setRange(-1.0, 1.0, 0.01);
     trackPanKnob.setValue(audioProcessor.trackPanAmt.load());
@@ -424,6 +491,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     cutGroupBox.onValueChanged = [this](int v)
     {
         audioProcessor.cutGroup.store(v, std::memory_order_relaxed);
+        audioProcessor.syncInstanceChokeRegistration();
         setHintText("Cut group: " + (v == 0 ? juce::String("---") : juce::String(v)));
     };
     contentCanvas.addAndMakeVisible(cutByBox);
@@ -431,22 +499,34 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
     cutByBox.onValueChanged = [this](int v)
     {
         audioProcessor.cutByGroup.store(v, std::memory_order_relaxed);
+        audioProcessor.syncInstanceChokeRegistration();
         setHintText("Cut by group: " + (v == 0 ? juce::String("---") : juce::String(v)));
     };
     contentCanvas.addAndMakeVisible(cutSelfPushBtn);
-    cutSelfPushBtn.setClickingTogglesState(true);
+    cutSelfPushBtn.setClickingTogglesState(false);
     cutSelfPushBtn.setColour(juce::TextButton::buttonColourId, FLColors::recessedBg());
-    cutSelfPushBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff4a5462));
+    cutSelfPushBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff38404c));
     cutSelfPushBtn.setColour(juce::TextButton::textColourOffId, FLColors::textBright());
-    cutSelfPushBtn.setColour(juce::TextButton::textColourOnId, FLColors::greenNeon());
-    buttonAttachments.push_back(std::make_unique<ButtonAttachment>(audioProcessor.apvts, "cutSelf", cutSelfPushBtn));
+    cutSelfPushBtn.setColour(juce::TextButton::textColourOnId, FLColors::textBright());
+    cutSelfPushBtn.onClick = [this]()
+    {
+        const int g = audioProcessor.allocateNextFreeSelfCutTrackGroup();
+        cutGroupBox.setValue(g, false);
+        cutByBox.setValue(g, false);
+        trackBox.setValue(g, false);
+        if (auto* p = audioProcessor.apvts.getParameter("cutSelf"))
+            p->setValueNotifyingHost(1.0f);
+        setHintText("Cut self assigned to Track " + juce::String(g) + " (Cut " + juce::String(g) + " - By " + juce::String(g) + ")");
+        repaint();
+    };
 
     // 6. Arpeggiator
     setupKnob(arpTimeKnob, "Arpeggiator time", 0.125, false, false, true);
     setupKnob(arpGateKnob, "Arpeggiator gate", 1.0,   false, false, true);
     arpGateKnob.setRange(0.0, 1.0, 0.01);
-    arpGateKnob.setValue(1.0);
+    arpGateKnob.setValue(audioProcessor.arpGateAmt.load());
     arpGateKnob.setDefaultResetValue(1.0);
+    arpGateKnob.onValueChange = [this]() { audioProcessor.arpGateAmt.store((float)arpGateKnob.getValue(), std::memory_order_relaxed); };
     contentCanvas.addAndMakeVisible(arpRangeBox);
     arpRangeBox.setValue((int)audioProcessor.apvts.getRawParameterValue("arpRange")->load());
     arpRangeBox.onValueChanged = [this](int v)
@@ -456,6 +536,10 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
         setHintText("Arpeggiator range: " + juce::String(v) + " oct");
     };
     contentCanvas.addAndMakeVisible(arpRepeatBox);
+    {
+        const int curRep = audioProcessor.arpRepeatCount.load();
+        arpRepeatBox.setValue(curRep <= 1 ? 0 : curRep);
+    }
     arpRepeatBox.onValueChanged = [this](int v)
     {
         audioProcessor.arpRepeatCount.store(juce::jmax(1, v == 0 ? 1 : v), std::memory_order_relaxed);
@@ -476,7 +560,7 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
         "Sus2",
         "Sus4"
     }, 1);
-    arpChordCombo.setSelectedId(2, juce::dontSendNotification);
+    arpChordCombo.setSelectedId(juce::jlimit(1, 7, audioProcessor.arpChordMode.load() + 1), juce::dontSendNotification);
     arpChordCombo.onChange = [this]()
     {
         audioProcessor.arpChordMode.store(arpChordCombo.getSelectedId() - 1, std::memory_order_relaxed);
@@ -551,6 +635,9 @@ FLSamplerAudioProcessorEditor::FLSamplerAudioProcessorEditor(FLSamplerAudioProce
 FLSamplerAudioProcessorEditor::~FLSamplerAudioProcessorEditor()
 {
     stopTimer();
+    sliderAttachments.clear();
+    buttonAttachments.clear();
+    comboAttachments.clear();
     setLookAndFeel(nullptr);
 }
 
@@ -591,6 +678,18 @@ void FLSamplerAudioProcessorEditor::updateInsTarget(int targetIdx)
     for (auto* k : envKnobs)
         k->getProperties().set("flRingColour", ringHex);
 
+    if (currentInsTarget == 1)
+    {
+        auto& ve = audioProcessor.targetEnvs[1];
+        ve.enabled = audioProcessor.apvts.getRawParameterValue("volEnvOn")->load() > 0.5f;
+        ve.delay   = audioProcessor.apvts.getRawParameterValue("envDelay")->load();
+        ve.attack  = audioProcessor.apvts.getRawParameterValue("envAttack")->load();
+        ve.hold    = audioProcessor.apvts.getRawParameterValue("envHold")->load();
+        ve.decay   = audioProcessor.apvts.getRawParameterValue("envDecay")->load();
+        ve.sustain = audioProcessor.apvts.getRawParameterValue("envSustain")->load();
+        ve.release = audioProcessor.apvts.getRawParameterValue("envRelease")->load();
+    }
+
     const auto& te = audioProcessor.targetEnvs[(size_t)currentInsTarget];
     volEnvOnBtn.setToggleState(te.enabled, juce::dontSendNotification);
     envDelayKnob.setValue(te.delay, juce::dontSendNotification);
@@ -604,6 +703,29 @@ void FLSamplerAudioProcessorEditor::updateInsTarget(int targetIdx)
     envDecTensionKnob.setValue(te.decTension, juce::dontSendNotification);
     envRelTensionKnob.setValue(te.relTension, juce::dontSendNotification);
     envTempoBtn.setToggleState(te.tempoSync, juce::dontSendNotification);
+
+    if (currentInsTarget == 1)
+    {
+        envDelayKnob.setDefaultResetValue(0.0);
+        envAttackKnob.setDefaultResetValue(0.0);
+        envHoldKnob.setDefaultResetValue(1.0);
+        envDecayKnob.setDefaultResetValue(0.0);
+        envSustainKnob.setDefaultResetValue(0.0);
+        envReleaseKnob.setDefaultResetValue(0.32);
+        envDecTensionKnob.setDefaultResetValue(0.0);
+        envRelTensionKnob.setDefaultResetValue(-0.45);
+    }
+    else
+    {
+        envDelayKnob.setDefaultResetValue(0.0);
+        envAttackKnob.setDefaultResetValue(0.18);
+        envHoldKnob.setDefaultResetValue(0.28);
+        envDecayKnob.setDefaultResetValue(0.35);
+        envSustainKnob.setDefaultResetValue(0.35);
+        envReleaseKnob.setDefaultResetValue(0.25);
+        envDecTensionKnob.setDefaultResetValue(0.0);
+        envRelTensionKnob.setDefaultResetValue(0.0);
+    }
 
     const auto& tl = audioProcessor.targetLfos[(size_t)currentInsTarget];
     currentLfoShape = tl.shape;
@@ -641,8 +763,8 @@ void FLSamplerAudioProcessorEditor::updateActiveSheet(int sheetIdx)
     stretchPitchKnob.setVisible(isSmp);
     stretchMulKnob.setVisible(isSmp);
     stretchTimeKnob.setVisible(isSmp);
-    formantShiftKnob.setVisible(isSmp);
     stretchModeCombo.setVisible(isSmp);
+    formantShiftKnob.setVisible(isSmp && (int)audioProcessor.apvts.getRawParameterValue("stretchMode")->load() == 4);
 
     wavScope.setVisible(isSmp);
     updatePrecomputedSubTab(legacyPrecomputedTab);
@@ -759,6 +881,225 @@ void FLSamplerAudioProcessorEditor::updatePrecomputedSubTab(bool showLegacy)
     repaint();
 }
 
+void FLSamplerAudioProcessorEditor::applyEnvelopeValues(bool enabled, float del, float att, float hld, float dec, float sus, float rel,
+                                                        float amt, float attT, float decT, float relT, bool tempoSync)
+{
+    auto& te = audioProcessor.targetEnvs[(size_t)currentInsTarget];
+    te.enabled    = enabled;
+    te.delay      = del;
+    te.attack     = att;
+    te.hold       = hld;
+    te.decay      = dec;
+    te.sustain    = sus;
+    te.release    = rel;
+    te.amount     = amt;
+    te.attTension = attT;
+    te.decTension = decT;
+    te.relTension = relT;
+    te.tempoSync  = tempoSync;
+
+    if (currentInsTarget == 1)
+    {
+        auto setParam = [this](const char* id, float v)
+        {
+            if (auto* p = audioProcessor.apvts.getParameter(id))
+                p->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, v));
+        };
+        setParam("volEnvOn",   enabled ? 1.0f : 0.0f);
+        setParam("envDelay",   del);
+        setParam("envAttack",  att);
+        setParam("envHold",    hld);
+        setParam("envDecay",   dec);
+        setParam("envSustain", sus);
+        setParam("envRelease", rel);
+    }
+
+    volEnvOnBtn.setToggleState(enabled, juce::dontSendNotification);
+    envDelayKnob.setValue(del, juce::dontSendNotification);
+    envAttackKnob.setValue(att, juce::dontSendNotification);
+    envHoldKnob.setValue(hld, juce::dontSendNotification);
+    envDecayKnob.setValue(dec, juce::dontSendNotification);
+    envSustainKnob.setValue(sus, juce::dontSendNotification);
+    envReleaseKnob.setValue(rel, juce::dontSendNotification);
+    envAmountKnob.setValue(amt, juce::dontSendNotification);
+    envAttTensionKnob.setValue(attT, juce::dontSendNotification);
+    envDecTensionKnob.setValue(decT, juce::dontSendNotification);
+    envRelTensionKnob.setValue(relT, juce::dontSendNotification);
+    envTempoBtn.setToggleState(tempoSync, juce::dontSendNotification);
+    repaint();
+}
+
+void FLSamplerAudioProcessorEditor::showEnvelopePresetMenu()
+{
+    juce::File presetDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                               .getChildFile("FLSampler")
+                               .getChildFile("EnvelopePresets");
+    presetDir.createDirectory();
+
+    juce::PopupMenu m;
+    m.addSectionHeader("Envelope Presets");
+    m.addItem(1, "808 / Square Hold (FL Default)");
+    m.addItem(2, "Short Pluck");
+    m.addItem(3, "Punchy Drum / Perc");
+    m.addItem(4, "Full Sustain Gate");
+    m.addItem(5, "Soft Pad / Swell");
+    m.addItem(6, "Filter / Pitch Pluck (+Amount)");
+    m.addItem(7, "Reset / Flat (Disabled)");
+    m.addSeparator();
+    m.addItem(10, "Save current envelope preset...");
+    m.addItem(11, "Load envelope preset (.flenv)...");
+
+    auto userFiles = presetDir.findChildFiles(juce::File::findFiles, false, "*.flenv");
+    userFiles.sort();
+    if (!userFiles.isEmpty())
+    {
+        m.addSeparator();
+        m.addSectionHeader("Saved User Presets");
+        for (int i = 0; i < userFiles.size(); ++i)
+            m.addItem(100 + i, userFiles[i].getFileNameWithoutExtension());
+    }
+
+    juce::Component::SafePointer<FLSamplerAudioProcessorEditor> safeThis(this);
+    m.showMenuAsync(juce::PopupMenu::Options(), [safeThis, presetDir, userFiles](int res)
+    {
+        if (safeThis == nullptr)
+            return;
+        auto* self = safeThis.getComponent();
+        if (res == 1)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.32f, 1.0f, 0.0f, 0.0f, -0.45f, false);
+            self->setHintText("Envelope preset: 808 / Square Hold");
+        }
+        else if (res == 2)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.0f, 0.0f, 0.28f, 0.0f, 0.12f, 0.75f, 0.0f, -0.45f, -0.45f, false);
+            self->setHintText("Envelope preset: Short Pluck");
+        }
+        else if (res == 3)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.0f, 0.06f, 0.22f, 0.0f, 0.08f, 0.85f, 0.0f, -0.35f, -0.45f, false);
+            self->setHintText("Envelope preset: Punchy Drum / Perc");
+        }
+        else if (res == 4)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.0f, 0.0f, 0.10f, 1.0f, 0.04f, 1.0f, 0.0f, 0.0f, -0.45f, false);
+            self->setHintText("Envelope preset: Full Sustain Gate");
+        }
+        else if (res == 5)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.42f, 0.10f, 0.45f, 0.80f, 0.48f, 0.70f, 0.15f, -0.25f, -0.35f, false);
+            self->setHintText("Envelope preset: Soft Pad / Swell");
+        }
+        else if (res == 6)
+        {
+            self->applyEnvelopeValues(true, 0.0f, 0.0f, 0.02f, 0.25f, 0.0f, 0.15f, 0.65f, 0.0f, -0.50f, -0.45f, false);
+            self->setHintText("Envelope preset: Filter / Pitch Pluck");
+        }
+        else if (res == 7)
+        {
+            if (self->currentInsTarget == 1)
+                self->applyEnvelopeValues(false, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.32f, 1.0f, 0.0f, 0.0f, -0.45f, false);
+            else
+                self->applyEnvelopeValues(false, 0.0f, 0.18f, 0.28f, 0.35f, 0.35f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+            self->setHintText("Envelope reset to default");
+        }
+        else if (res == 10)
+        {
+            self->fileChooser = std::make_unique<juce::FileChooser>("Save Envelope Preset", presetDir, "*.flenv");
+            self->fileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                [safeThis](const juce::FileChooser& fc)
+                {
+                    if (safeThis == nullptr)
+                        return;
+                    auto f = fc.getResult();
+                    if (f != juce::File())
+                    {
+                        juce::File target = f.withFileExtension(".flenv");
+                        const auto& te = safeThis->audioProcessor.targetEnvs[(size_t)safeThis->currentInsTarget];
+                        juce::ValueTree vt("FLEnvelopePreset");
+                        vt.setProperty("enabled",    te.enabled.load(), nullptr);
+                        vt.setProperty("delay",      te.delay.load(), nullptr);
+                        vt.setProperty("attack",     te.attack.load(), nullptr);
+                        vt.setProperty("hold",       te.hold.load(), nullptr);
+                        vt.setProperty("decay",      te.decay.load(), nullptr);
+                        vt.setProperty("sustain",    te.sustain.load(), nullptr);
+                        vt.setProperty("release",    te.release.load(), nullptr);
+                        vt.setProperty("amount",     te.amount.load(), nullptr);
+                        vt.setProperty("attTension", te.attTension.load(), nullptr);
+                        vt.setProperty("decTension", te.decTension.load(), nullptr);
+                        vt.setProperty("relTension", te.relTension.load(), nullptr);
+                        vt.setProperty("tempoSync",  te.tempoSync.load(), nullptr);
+                        if (auto xml = vt.createXml())
+                        {
+                            xml->writeTo(target);
+                            safeThis->setHintText("Saved envelope preset: " + target.getFileNameWithoutExtension());
+                        }
+                    }
+                });
+        }
+        else if (res == 11)
+        {
+            self->fileChooser = std::make_unique<juce::FileChooser>("Load Envelope Preset", presetDir, "*.flenv");
+            self->fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                [safeThis](const juce::FileChooser& fc)
+                {
+                    if (safeThis == nullptr)
+                        return;
+                    auto f = fc.getResult();
+                    if (f.existsAsFile())
+                    {
+                        if (auto xml = juce::XmlDocument::parse(f))
+                        {
+                            auto vt = juce::ValueTree::fromXml(*xml);
+                            if (vt.isValid())
+                            {
+                                safeThis->applyEnvelopeValues(
+                                    (bool)vt.getProperty("enabled", true),
+                                    (float)vt.getProperty("delay", 0.0f),
+                                    (float)vt.getProperty("attack", 0.0f),
+                                    (float)vt.getProperty("hold", 0.28f),
+                                    (float)vt.getProperty("decay", 0.0f),
+                                    (float)vt.getProperty("sustain", 0.0f),
+                                    (float)vt.getProperty("release", 0.0f),
+                                    (float)vt.getProperty("amount", 1.0f),
+                                    (float)vt.getProperty("attTension", 0.0f),
+                                    (float)vt.getProperty("decTension", 0.0f),
+                                    (float)vt.getProperty("relTension", -0.45f),
+                                    (bool)vt.getProperty("tempoSync", false));
+                                safeThis->setHintText("Loaded envelope preset: " + f.getFileNameWithoutExtension());
+                            }
+                        }
+                    }
+                });
+        }
+        else if (res >= 100 && res - 100 < userFiles.size())
+        {
+            juce::File f = userFiles[res - 100];
+            if (auto xml = juce::XmlDocument::parse(f))
+            {
+                auto vt = juce::ValueTree::fromXml(*xml);
+                if (vt.isValid())
+                {
+                    self->applyEnvelopeValues(
+                        (bool)vt.getProperty("enabled", true),
+                        (float)vt.getProperty("delay", 0.0f),
+                        (float)vt.getProperty("attack", 0.0f),
+                        (float)vt.getProperty("hold", 0.28f),
+                        (float)vt.getProperty("decay", 0.0f),
+                        (float)vt.getProperty("sustain", 0.0f),
+                        (float)vt.getProperty("release", 0.0f),
+                        (float)vt.getProperty("amount", 1.0f),
+                        (float)vt.getProperty("attTension", 0.0f),
+                        (float)vt.getProperty("decTension", 0.0f),
+                        (float)vt.getProperty("relTension", -0.45f),
+                        (bool)vt.getProperty("tempoSync", false));
+                    self->setHintText("Loaded envelope preset: " + f.getFileNameWithoutExtension());
+                }
+            }
+        }
+    });
+}
+
 void FLSamplerAudioProcessorEditor::openSampleFileChooser()
 {
     fileChooser = std::make_unique<juce::FileChooser>(
@@ -768,31 +1109,220 @@ void FLSamplerAudioProcessorEditor::openSampleFileChooser()
             : juce::File::getSpecialLocation(juce::File::userMusicDirectory),
         "*.wav;*.flac;*.mp3;*.ogg;*.aiff;*.aif");
 
+    juce::Component::SafePointer<FLSamplerAudioProcessorEditor> safeThis(this);
     fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [this](const juce::FileChooser& fc)
+        [safeThis](const juce::FileChooser& fc)
         {
+            if (safeThis == nullptr)
+                return;
             auto f = fc.getResult();
             if (f.existsAsFile())
             {
-                audioProcessor.loadSampleFromFile(f);
-                wavScope.refreshIfNeeded();
-                repaint();
+                safeThis->audioProcessor.loadSampleFromFile(f);
+                safeThis->wavScope.refreshIfNeeded();
+                safeThis->repaint();
             }
         });
 }
 
 void FLSamplerAudioProcessorEditor::timerCallback()
 {
+    audioProcessor.flushPrecomputeIfNeeded();
     wavScope.refreshIfNeeded();
-    if (currentSheet == 1)
+
+    const uint32_t curStateRev = audioProcessor.getStateRevision();
+    if (curStateRev != lastSeenStateRev)
+    {
+        lastSeenStateRev = curStateRev;
+        flLookAndFeel.refreshThemeColours();
+        keepOnDiskBtn.setToggleState(audioProcessor.keepOnDisk.load(), juce::dontSendNotification);
+        loadRegionsBtn.setToggleState(audioProcessor.loadRegions.load(), juce::dontSendNotification);
+        loadSlicesBtn.setToggleState(audioProcessor.loadSliceMarkers.load(), juce::dontSendNotification);
+        trackBox.setValue(audioProcessor.mixerTrack.load());
+        cutGroupBox.setValue(audioProcessor.cutGroup.load());
+        cutByBox.setValue(audioProcessor.cutByGroup.load());
+        addToKeyBtn.setToggleState(audioProcessor.addToKey.load(), juce::dontSendNotification);
+        fullPortaBtn.setToggleState(audioProcessor.fullPorta.load(), juce::dontSendNotification);
+        shiftKnob.setValue(audioProcessor.shiftTimeAmt.load(), juce::dontSendNotification);
+        swingKnob.setValue(audioProcessor.swingMulAmt.load(), juce::dontSendNotification);
+        trackingKeyMode = audioProcessor.trackingKeyMode.load();
+        lvlPanKnob.setValue(audioProcessor.lvlPanOffset.load(), juce::dontSendNotification);
+        lvlVolKnob.setValue(audioProcessor.lvlVolOffset.load(), juce::dontSendNotification);
+        lvlModXKnob.setValue(audioProcessor.lvlModXOffset.load(), juce::dontSendNotification);
+        lvlModYKnob.setValue(audioProcessor.lvlModYOffset.load(), juce::dontSendNotification);
+        trackPanKnob.setValue(audioProcessor.trackPanAmt.load(), juce::dontSendNotification);
+        trackModXKnob.setValue(audioProcessor.trackModXAmt.load(), juce::dontSendNotification);
+        trackModYKnob.setValue(audioProcessor.trackModYAmt.load(), juce::dontSendNotification);
+        trackMidSlider.setValue(audioProcessor.trackMidNote.load(), juce::dontSendNotification);
+        arpGateKnob.setValue(audioProcessor.arpGateAmt.load(), juce::dontSendNotification);
+        const int curRep = audioProcessor.arpRepeatCount.load();
+        arpRepeatBox.setValue(curRep <= 1 ? 0 : curRep);
+        arpSlideBtn.setToggleState(audioProcessor.arpSlideOn.load(), juce::dontSendNotification);
+        arpChordCombo.setSelectedId(juce::jlimit(1, 7, audioProcessor.arpChordMode.load() + 1), juce::dontSendNotification);
+        echoPanKnob.setValue(audioProcessor.echoPanAmt.load(), juce::dontSendNotification);
+        echoModXKnob.setValue(audioProcessor.echoModXAmt.load(), juce::dontSendNotification);
+        echoModYKnob.setValue(audioProcessor.echoModYAmt.load(), juce::dontSendNotification);
+        echoPitchKnob.setValue(audioProcessor.echoPitchAmt.load(), juce::dontSendNotification);
+        echoFatModeBtn.setToggleState(audioProcessor.echoFatModeOn.load(), juce::dontSendNotification);
+        updateInsTarget(currentInsTarget);
+        contentCanvas.repaint();
+        repaint();
+    }
+
+    const int curPoly = (int)audioProcessor.apvts.getRawParameterValue("maxPoly")->load();
+    if (maxPolyBox.getValue() != curPoly)
+        maxPolyBox.setValue(curPoly);
+    const int curRange = (int)audioProcessor.apvts.getRawParameterValue("pitchRange")->load();
+    if (pitchRangeBox.getValue() != curRange)
+        pitchRangeBox.setValue(curRange);
+    const int curArpRange = (int)audioProcessor.apvts.getRawParameterValue("arpRange")->load();
+    if (arpRangeBox.getValue() != curArpRange)
+        arpRangeBox.setValue(curArpRange);
+    const int curEchoCount = (int)audioProcessor.apvts.getRawParameterValue("echoCount")->load();
+    if (echoCountBox.getValue() != curEchoCount)
+        echoCountBox.setValue(curEchoCount);
+
+    if (currentSheet == 0)
+    {
+        const int modeIdx = (int)audioProcessor.apvts.getRawParameterValue("stretchMode")->load();
+        const bool wantFormantVis = (modeIdx == 4);
+        if (formantShiftKnob.isVisible() != wantFormantVis)
+        {
+            formantShiftKnob.setVisible(wantFormantVis);
+            repaint();
+        }
+    }
+    else if (currentSheet == 1)
+    {
         repaint(6, 80, getWidth() - 12, 220);
+    }
 }
 
-// Draws an FL Studio 2026 panel (or Ableton Live 12 flat device rack / GrowthTune Private card when active)
+// Draws an FL Studio 2026 panel (or DAW / OS themed panel when active)
 static void drawFLPanel(juce::Graphics& g, juce::Rectangle<int> r, const juce::String& title, int titleIndent = 8)
 {
     auto rf = r.toFloat();
-    if (FLColors::skinMode == 1)
+    if (FLColors::isWin98Skin)
+    {
+        // Classic Windows 98 raised 3D grey dialog box with etched group frame & navy header bar
+        g.setColour(FLColors::panelBg());
+        g.fillRect(r);
+        g.setColour(juce::Colours::white);
+        g.drawHorizontalLine(r.getY(), (float)r.getX(), (float)r.getRight() - 1.0f);
+        g.drawVerticalLine(r.getX(), (float)r.getY(), (float)r.getBottom() - 1.0f);
+        g.setColour(juce::Colour(0xff808080));
+        g.drawHorizontalLine(r.getBottom() - 2, (float)r.getX() + 1.0f, (float)r.getRight() - 1.0f);
+        g.drawVerticalLine(r.getRight() - 2, (float)r.getY() + 1.0f, (float)r.getBottom() - 1.0f);
+        g.setColour(juce::Colour(0xff404040));
+        g.drawHorizontalLine(r.getBottom() - 1, (float)r.getX(), (float)r.getRight());
+        g.drawVerticalLine(r.getRight() - 1, (float)r.getY(), (float)r.getBottom());
+
+        if (title.isNotEmpty())
+        {
+            juce::ColourGradient titleG(juce::Colour(0xff000080), (float)r.getX() + 2.0f, (float)r.getY() + 2.0f,
+                                        juce::Colour(0xff1084d0), (float)r.getRight() - 2.0f, (float)r.getY() + 2.0f, false);
+            g.setGradientFill(titleG);
+            g.fillRect(r.getX() + 2, r.getY() + 2, r.getWidth() - 4, 16);
+
+            g.setColour(juce::Colours::white);
+            g.setFont(juce::Font(juce::FontOptions(11.5f, juce::Font::bold)));
+            g.drawText(title, r.getX() + titleIndent, r.getY() + 2, r.getWidth() - titleIndent - 4, 16,
+                       juce::Justification::centredLeft, false);
+        }
+        return;
+    }
+    if (FLColors::isMacOSXSkin)
+    {
+        // Classic Mac OS X Aqua rounded card with subtle horizontal Aqua pinstripes & glossy header bar
+        g.setColour(FLColors::panelBg());
+        g.fillRoundedRectangle(rf, 6.0f);
+
+        g.setColour(juce::Colour(0xffe2e5eb));
+        for (int py = r.getY() + 20; py < r.getBottom() - 2; py += 4)
+            g.drawHorizontalLine(py, (float)r.getX() + 2.0f, (float)r.getRight() - 2.0f);
+
+        if (title.isNotEmpty())
+        {
+            juce::ColourGradient aquaHeader(juce::Colour(0xfff8fafd), (float)r.getX(), (float)r.getY(),
+                                            juce::Colour(0xffd4dce8), (float)r.getX(), (float)r.getY() + 19.0f, false);
+            g.setGradientFill(aquaHeader);
+            g.fillRoundedRectangle((float)r.getX() + 1.0f, (float)r.getY() + 1.0f, (float)r.getWidth() - 2.0f, 18.0f, 5.0f);
+            g.setColour(juce::Colour(0xffb5becb));
+            g.drawHorizontalLine(r.getY() + 19, (float)r.getX() + 1.0f, (float)r.getRight() - 1.0f);
+
+            g.setColour(FLColors::textBright());
+            g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+            g.drawText(title, r.getX() + titleIndent, r.getY() + 2, r.getWidth() - titleIndent - 4, 16,
+                       juce::Justification::centredLeft, false);
+        }
+
+        g.setColour(FLColors::panelBorder());
+        g.drawRoundedRectangle(rf.reduced(0.5f), 6.0f, 1.0f);
+        return;
+    }
+    if (FLColors::isWinampSkin)
+    {
+        // Classic Winamp 2.x panel: dark navy-slate chassis with 3D metallic double bevel & gold/bronze header bar
+        g.setColour(FLColors::panelBg());
+        g.fillRect(r);
+        g.setColour(juce::Colour(0xff5a607a));
+        g.drawHorizontalLine(r.getY(), (float)r.getX(), (float)r.getRight() - 1.0f);
+        g.drawVerticalLine(r.getX(), (float)r.getY(), (float)r.getBottom() - 1.0f);
+        g.setColour(juce::Colour(0xff101119));
+        g.drawHorizontalLine(r.getBottom() - 1, (float)r.getX(), (float)r.getRight());
+        g.drawVerticalLine(r.getRight() - 1, (float)r.getY(), (float)r.getBottom());
+
+        if (title.isNotEmpty())
+        {
+            juce::ColourGradient winampHdr(juce::Colour(0xff4a4228), (float)r.getX() + 1.0f, (float)r.getY() + 1.0f,
+                                           juce::Colour(0xff1e202d), (float)r.getX() + 1.0f, (float)r.getY() + 18.0f, false);
+            g.setGradientFill(winampHdr);
+            g.fillRect(r.getX() + 1, r.getY() + 1, r.getWidth() - 2, 17);
+            g.setColour(juce::Colour(0xffb59b52));
+            g.drawHorizontalLine(r.getY() + 18, (float)r.getX() + 1.0f, (float)r.getRight() - 1.0f);
+
+            g.setColour(juce::Colour(0xffffd84d));
+            g.setFont(juce::Font(juce::FontOptions(11.5f, juce::Font::bold)));
+            g.drawText(title, r.getX() + titleIndent, r.getY() + 1, r.getWidth() - titleIndent - 4, 17,
+                       juce::Justification::centredLeft, false);
+        }
+        return;
+    }
+    if (FLColors::isProToolsSkin || FLColors::isLogicSkin || FLColors::isSequoiaSkin || FLColors::isAuditionSkin || FLColors::isCubaseSkin || FLColors::isReaperSkin)
+    {
+        const float corner = FLColors::isLogicSkin ? 5.0f : (FLColors::isProToolsSkin ? 3.0f : 1.5f);
+        g.setColour(FLColors::panelBg());
+        g.fillRoundedRectangle(rf, corner);
+        g.setColour(FLColors::panelBorder());
+        g.drawRoundedRectangle(rf.reduced(0.5f), corner, 1.0f);
+
+        if (title.isNotEmpty())
+        {
+            const juce::Colour hdrCol = FLColors::isProToolsSkin ? juce::Colour(0xff202328)
+                                      : (FLColors::isLogicSkin ? juce::Colour(0xff1d2024)
+                                      : (FLColors::isSequoiaSkin ? juce::Colour(0xff1a1d22)
+                                      : (FLColors::isAuditionSkin ? juce::Colour(0xff181a1c)
+                                      : (FLColors::isReaperSkin ? juce::Colour(0xff212627) : juce::Colour(0xff181b21)))));
+            g.setColour(hdrCol);
+            g.fillRoundedRectangle((float)r.getX() + 1.0f, (float)r.getY() + 1.0f, (float)r.getWidth() - 2.0f, 18.0f, corner);
+            g.setColour(FLColors::panelBorder());
+            g.drawHorizontalLine(r.getY() + 19, (float)r.getX() + 1.0f, (float)r.getRight() - 1.0f);
+
+            // Subtle left accent bar in Cubase / Pro Tools / Sequoia / Audition / Reaper
+            if (FLColors::isCubaseSkin || FLColors::isProToolsSkin || FLColors::isSequoiaSkin || FLColors::isAuditionSkin || FLColors::isReaperSkin)
+            {
+                g.setColour(FLColors::greenNeon());
+                g.fillRect((float)r.getX() + 2.0f, (float)r.getY() + 4.0f, 2.5f, 12.0f);
+            }
+
+            g.setColour(FLColors::textBright());
+            g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
+            g.drawText(title, r.getX() + titleIndent, r.getY() + 2, r.getWidth() - titleIndent - 4, 16,
+                       juce::Justification::centredLeft, false);
+        }
+        return;
+    }
+    if (FLColors::isAbletonSkin)
     {
         g.setColour(FLColors::panelBg());
         g.fillRect(rf);
@@ -813,31 +1343,7 @@ static void drawFLPanel(juce::Graphics& g, juce::Rectangle<int> r, const juce::S
         }
         return;
     }
-    if (FLColors::skinMode == 2)
-    {
-        // Translucent dark-glass card so VOCESFX Skin 1 background shines through cleanly!
-        g.setColour(juce::Colour(0xc8120c18));
-        g.fillRoundedRectangle(rf, 6.0f);
-        g.setColour(juce::Colour(0xffec4899).withAlpha(0.38f));
-        g.drawRoundedRectangle(rf.reduced(0.5f), 6.0f, 1.1f);
-
-        if (title.isNotEmpty())
-        {
-            juce::ColourGradient titleGrad(juce::Colour(0xffec4899).withAlpha(0.18f), (float)r.getX(), (float)r.getY(),
-                                           juce::Colour(0xffa855f7).withAlpha(0.03f), (float)r.getRight(), (float)r.getY(), false);
-            g.setGradientFill(titleGrad);
-            g.fillRoundedRectangle((float)r.getX() + 1.0f, (float)r.getY() + 1.0f, (float)r.getWidth() - 2.0f, 18.0f, 5.0f);
-            g.setColour(juce::Colour(0xff2d243b));
-            g.drawHorizontalLine(r.getY() + 19, (float)r.getX() + 2.0f, (float)r.getRight() - 2.0f);
-
-            g.setColour(FLColors::textBright());
-            g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
-            g.drawText(title, r.getX() + titleIndent, r.getY() + 2, r.getWidth() - titleIndent - 4, 16,
-                       juce::Justification::centredLeft, false);
-        }
-        return;
-    }
-    if (FLColors::skinMode == 3)
+    if (FLColors::isBlackSkin || FLColors::isWhiteSkin)
     {
         g.setColour(FLColors::panelBg());
         g.fillRoundedRectangle(rf, 4.0f);
@@ -846,9 +1352,9 @@ static void drawFLPanel(juce::Graphics& g, juce::Rectangle<int> r, const juce::S
 
         if (title.isNotEmpty())
         {
-            g.setColour(juce::Colour(0xff141418));
+            g.setColour(FLColors::isWhiteSkin ? juce::Colour(0xfff1f5f9) : juce::Colour(0xff141418));
             g.fillRoundedRectangle((float)r.getX() + 1.0f, (float)r.getY() + 1.0f, (float)r.getWidth() - 2.0f, 18.0f, 3.0f);
-            g.setColour(juce::Colour(0xff27272a));
+            g.setColour(FLColors::isWhiteSkin ? juce::Colour(0xffe2e8f0) : juce::Colour(0xff27272a));
             g.drawHorizontalLine(r.getY() + 19, (float)r.getX() + 1.0f, (float)r.getRight() - 1.0f);
 
             g.setColour(FLColors::textBright());
@@ -868,7 +1374,7 @@ static void drawFLPanel(juce::Graphics& g, juce::Rectangle<int> r, const juce::S
     {
         // Angled chamfer line after title
         int titleW = (int)title.length() * 7 + titleIndent + 14;
-        g.setColour(juce::Colour(0xff262b32));
+        g.setColour(juce::Colour(FLColors::isFLDarkSkin ? 0xff111317 : 0xff262b32));
         g.drawLine((float)(r.getX() + titleW), (float)r.getY(),
                    (float)(r.getX() + titleW + 10), (float)(r.getY() + 18), 1.0f);
         g.drawLine((float)(r.getX() + titleW + 10), (float)(r.getY() + 18),
@@ -891,6 +1397,47 @@ static void drawSmallCapLabel(juce::Graphics& g, const juce::Slider& s, const ju
                juce::Justification::centred, false);
 }
 
+// Draws a crisp, non-self-intersecting FL Studio open-end C-wrench (used in both Header Tab 3 & Precomputed Effects Sub-Tab 1)
+static void drawFLOpenWrenchIcon(juce::Graphics& g, float cx, float cy, float scale,
+                                 juce::Colour mainCol, juce::Colour cutoutCol)
+{
+    const float hx = cx + 2.8f * scale;
+    const float hy = cy - 2.6f * scale;
+    const float rOut = 5.4f * scale;
+    const float rIn  = 2.6f * scale;
+
+    // 1. Diagonal rounded handle with inner slot
+    {
+        juce::Path handleOuter;
+        handleOuter.startNewSubPath(hx - 1.8f * scale, hy + 0.2f * scale);
+        handleOuter.lineTo(cx - 7.8f * scale, cy + 6.2f * scale);
+        handleOuter.lineTo(cx - 5.2f * scale, cy + 8.8f * scale);
+        handleOuter.lineTo(hx + 0.8f * scale, hy + 2.8f * scale);
+        handleOuter.closeSubPath();
+        g.setColour(mainCol);
+        g.fillPath(handleOuter.createPathWithRoundedCorners(1.4f * scale));
+    }
+
+    // 2. Outer C-head circle
+    g.setColour(mainCol);
+    g.fillEllipse(hx - rOut, hy - rOut, rOut * 2.0f, rOut * 2.0f);
+
+    // 3. Carve inner jaw circle & right-facing jaw mouth opening cleanly (zero self-intersection!)
+    g.setColour(cutoutCol);
+    g.fillEllipse(hx - rIn, hy - rIn, rIn * 2.0f, rIn * 2.0f);
+
+    juce::Path jawOpening;
+    jawOpening.startNewSubPath(hx, hy - rIn * 0.92f);
+    jawOpening.lineTo(hx + rOut + 1.5f * scale, hy - rIn * 1.05f);
+    jawOpening.lineTo(hx + rOut + 1.5f * scale, hy + rIn * 1.05f);
+    jawOpening.lineTo(hx, hy + rIn * 0.92f);
+    jawOpening.closeSubPath();
+    g.fillPath(jawOpening);
+
+    // 4. Carve inner slot along the diagonal handle
+    g.drawLine(cx - 5.6f * scale, cy + 6.6f * scale, hx - 2.4f * scale, hy + 3.4f * scale, 1.35f * scale);
+}
+
 void FLSamplerAudioProcessorEditor::drawRootNoteAndKeyboardPanel(juce::Graphics& g)
 {
     static const char* noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -908,35 +1455,153 @@ void FLSamplerAudioProcessorEditor::drawRootNoteAndKeyboardPanel(juce::Graphics&
     g.setFont(juce::Font(juce::FontOptions(12.0f)));
     g.drawText("Reset", resetRootBtnRect, juce::Justification::centred, false);
 
-    // "Fine tune" label
+    // "Fine tune" label (with generous spacing after "Add to key")
     g.setColour(FLColors::textBright());
-    g.drawText("Fine tune", 258, 330, 56, 18, juce::Justification::centredLeft, false);
+    g.drawText("Fine tune", 272, 330, 56, 18, juce::Justification::centredLeft, false);
 
-    // Multi-touch hand icon on far right
+    // 1:1 FL Studio Multi-touch Pointing Hand Toggle Icon on far right (Image 1 when selected, Image 2 when unselected)
     {
-        float hx = 502.0f, hy = 338.0f;
-        g.setColour(FLColors::textBright());
-        g.fillRoundedRectangle(hx - 4.0f, hy - 3.0f, 8.0f, 7.0f, 2.0f);
-        g.drawLine(hx - 6.0f, hy - 5.0f, hx - 1.0f, hy - 1.0f, 2.0f);
+        auto hr = keybHandBtnRect.toFloat();
+        if (zoomedKeyboardMode)
+        {
+            // Angled trapezoid border matching FL Studio's orange-gold active frame in Image 1
+            juce::Path frame;
+            frame.startNewSubPath(hr.getX() + 7.0f, hr.getY() + 1.0f);
+            frame.lineTo(hr.getRight() - 1.0f, hr.getY() + 1.0f);
+            frame.lineTo(hr.getRight() - 1.0f, hr.getBottom() - 1.0f);
+            frame.lineTo(hr.getX() + 1.0f, hr.getBottom() - 1.0f);
+            frame.closeSubPath();
+
+            g.setColour(juce::Colour(0xff1c1f24));
+            g.fillPath(frame);
+            g.setColour(juce::Colour(0xffffa63b));
+            g.strokePath(frame, juce::PathStrokeType(1.3f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+
+        // Pointing hand silhouette tilted up-left with cuff (1:1 Image 1 & Image 2)
+        const float hx = hr.getCentreX() + 2.0f;
+        const float hy = hr.getCentreY() + 1.0f;
+        const juce::Colour handCol = zoomedKeyboardMode ? juce::Colour(0xffffa63b) : FLColors::textBright();
+
+        juce::Path hand;
+        // Index finger pointing up-left
+        hand.startNewSubPath(hx - 6.8f, hy - 5.8f);
+        hand.lineTo(hx - 5.3f, hy - 7.1f);
+        hand.lineTo(hx - 1.2f, hy - 3.4f);
+        // Knuckles / folded fingers on top-right
+        hand.quadraticTo(hx + 3.8f, hy - 3.8f, hx + 5.6f, hy - 0.5f);
+        hand.lineTo(hx + 3.2f, hy + 3.2f);
+        // Palm bottom & thumb pointing left
+        hand.lineTo(hx - 2.0f, hy + 2.4f);
+        hand.lineTo(hx - 6.2f, hy + 1.2f);
+        hand.lineTo(hx - 5.8f, hy - 0.8f);
+        hand.lineTo(hx - 2.8f, hy - 0.5f);
+        hand.closeSubPath();
+
+        g.setColour(handCol);
+        g.fillPath(hand);
+
+        // Wrist cuff line at bottom-right
+        g.drawLine(hx + 1.5f, hy + 4.8f, hx + 5.6f, hy + 1.6f, 1.5f);
     }
 
-    // Piano Keyboard C2..C8 (MIDI 24..96 = 43 white keys)
-    g.setColour(juce::Colour(0xffd2d8e0));
-    g.fillRect(bottomKeybRect);
-
-    const int startMidi = 24; // C2
-    const int endMidi   = 96; // C8
-
-    // Count white keys (43 white keys from C2 to C8)
     auto isBlackKey = [](int m) {
         int pc = m % 12;
         return (pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10);
     };
 
-    const int numWhiteKeys = 43;
-    const float whiteW = (float)bottomKeybRect.getWidth() / (float)numWhiteKeys;
     const float kbX = (float)bottomKeybRect.getX();
     const float kbY = (float)bottomKeybRect.getY();
+    const float kbW = (float)bottomKeybRect.getWidth();
+
+    // ==================== MODE A: ZOOMED TOUCH PIANO VIEW (B3..D6 = 17 White Keys, Full Height, Bottom Note Labels - Image 1) ====================
+    if (zoomedKeyboardMode)
+    {
+        const float kbH = (float)bottomKeybRect.getHeight() + 12.0f; // Covers full height down to bottom of panel (no scrollbar!)
+        juce::Graphics::ScopedSaveState clipKb(g);
+        g.reduceClipRegion(bottomKeybRect.getX(), bottomKeybRect.getY(), bottomKeybRect.getWidth(), (int)kbH);
+
+        const int startMidi = 47; // B3
+        const int endMidi   = 74; // D6
+        const int numWhiteKeys = 17; // B3, C4..B4 (7), C5..B5 (7), C6, D6 = 17 white keys
+        const float whiteW = kbW / (float)numWhiteKeys;
+
+        // 1. Draw wide white keys with note names at the bottom (B3, C4, D4, E4, F4, G4, A4, B4, C5, D5, E5, F5, G5, A5, B5, C6, D6)
+        int wIdx = 0;
+        for (int m = startMidi; m <= endMidi; ++m)
+        {
+            if (isBlackKey(m)) continue;
+            juce::Rectangle<float> wr(kbX + wIdx * whiteW, kbY, whiteW, kbH);
+
+            int oct = (m / 12);
+            bool altOctave = (oct % 2 == 1);
+            if (m == rootNote)
+                g.setColour(FLColors::isAbletonSkin ? juce::Colour(0xff00d2ff) : juce::Colour(0xff74a9e8));
+            else if (m == previewHeldMidiNote)
+                g.setColour(FLColors::greenNeon());
+            else
+                g.setColour(altOctave ? juce::Colour(0xffbcc3cc) : juce::Colour(0xffccd3dc));
+
+            g.fillRect(wr);
+            g.setColour(juce::Colour(0xff7c848e));
+            g.drawRect(wr, 0.6f);
+
+            const juce::String keyLabel = juce::String(noteNames[m % 12]) + juce::String(oct);
+            g.setColour(m == rootNote ? juce::Colour(0xff0d2240) : juce::Colour(0xff525a64));
+            g.setFont(juce::Font(juce::FontOptions(13.0f, m == rootNote ? juce::Font::bold : juce::Font::plain)));
+            g.drawText(keyLabel, (int)wr.getX(), (int)(kbY + kbH - 22.0f), (int)whiteW, 18,
+                       juce::Justification::centred, false);
+            ++wIdx;
+        }
+
+        // 2. Draw wide 3D bevelled black keys Flush from Top of Keyboard (including left half-key A#3 and right half-key D#6 matching Image 1!)
+        const float bw = whiteW * 0.68f;
+        const float bh = kbH * 0.48f;
+        auto drawZoomedBlackKey = [&](float bx, int midiNum)
+        {
+            juce::Rectangle<float> br(bx, kbY, bw, bh);
+            g.setColour(midiNum == rootNote ? juce::Colour(0xff4c88d4)
+                                            : (midiNum == previewHeldMidiNote ? FLColors::greenNeon() : juce::Colour(0xff1e2126)));
+            g.fillRect(br);
+
+            // Inner 3D matte cap with diagonal sheen matching Image 1
+            auto inner = br.reduced(2.2f, 2.0f);
+            juce::ColourGradient blkGrad(juce::Colour(0xff383d45), inner.getX(), inner.getY(),
+                                         juce::Colour(0xff23272c), inner.getRight(), inner.getBottom(), false);
+            g.setGradientFill(blkGrad);
+            g.fillRect(inner);
+
+            g.setColour(juce::Colour(0xff50565f));
+            g.drawHorizontalLine((int)(br.getBottom() - 2.5f), inner.getX(), inner.getRight());
+        };
+
+        // Partial A#3 black key on far left edge (before B3)
+        drawZoomedBlackKey(kbX - bw * 0.55f, 46);
+
+        wIdx = 0;
+        for (int m = startMidi; m <= endMidi; ++m)
+        {
+            if (!isBlackKey(m))
+            {
+                ++wIdx;
+                continue;
+            }
+            drawZoomedBlackKey(kbX + (float)wIdx * whiteW - bw * 0.5f, m);
+        }
+
+        // Partial D#6 black key on far right edge (after D6)
+        drawZoomedBlackKey(kbX + (float)numWhiteKeys * whiteW - bw * 0.45f, 75);
+        return;
+    }
+
+    // ==================== MODE B: STANDARD OVERVIEW KEYBOARD (C2..C8 = 43 White Keys + Top Octave Header Strip + Bottom Scrollbar - Image 2) ====================
+    g.setColour(juce::Colour(0xffd2d8e0));
+    g.fillRect(bottomKeybRect);
+
+    const int startMidi = 24; // C2
+    const int endMidi   = 96; // C8
+    const int numWhiteKeys = 43;
+    const float whiteW = kbW / (float)numWhiteKeys;
     const float kbH = (float)bottomKeybRect.getHeight();
 
     // First pass: draw white keys
@@ -953,27 +1618,35 @@ void FLSamplerAudioProcessorEditor::drawRootNoteAndKeyboardPanel(juce::Graphics&
         else if (m == previewHeldMidiNote)
             g.setColour(FLColors::greenNeon());
         else
-            g.setColour(altOctave ? juce::Colour(0xffc9d0d8) : juce::Colour(0xffdde3ea));
+            g.setColour(altOctave ? juce::Colour(0xffbcc3cc) : juce::Colour(0xffccd3dc));
 
         g.fillRect(wr);
         g.setColour(juce::Colour(0xff8e96a0));
         g.drawRect(wr, 0.5f);
+        ++wIdx;
+    }
 
+    // Top header strip above black keys + Octave labels C2, C3, C4, C5, C6, C7, C8
+    g.setColour(juce::Colour(0xff68707a).withAlpha(0.25f));
+    g.fillRect(kbX, kbY, kbW, 14.0f);
+
+    wIdx = 0;
+    for (int m = startMidi; m <= endMidi; ++m)
+    {
+        if (isBlackKey(m)) continue;
         if (m % 12 == 0)
         {
-            g.setColour(juce::Colour(0xff1e2228));
-            g.setFont(juce::Font(juce::FontOptions(10.0f)));
-            g.drawText("C" + juce::String(oct), (int)wr.getX() + 1, (int)kbY + 1, 20, 12,
+            int oct = (m / 12);
+            float wx = kbX + wIdx * whiteW;
+            g.setColour(juce::Colour(0xff14171c));
+            g.setFont(juce::Font(juce::FontOptions(11.0f)));
+            g.drawText("C" + juce::String(oct), (int)wx + 1, (int)kbY + 1, 22, 13,
                        juce::Justification::centredLeft, false);
         }
         ++wIdx;
     }
 
-    // Top header strip above black keys
-    g.setColour(juce::Colour(0xff68707a).withAlpha(0.35f));
-    g.fillRect(kbX, kbY, (float)bottomKeybRect.getWidth(), 13.0f);
-
-    // Second pass: draw 3D black keys
+    // Second pass: draw 3D black keys with glossy bottom-right bevel highlight (1:1 Image 2)
     wIdx = 0;
     for (int m = startMidi; m <= endMidi; ++m)
     {
@@ -984,27 +1657,42 @@ void FLSamplerAudioProcessorEditor::drawRootNoteAndKeyboardPanel(juce::Graphics&
         }
         float bx = kbX + ((float)wIdx - 0.35f) * whiteW;
         float bw = whiteW * 0.70f;
-        float bh = kbH * 0.62f;
-        juce::Rectangle<float> br(bx, kbY + 13.0f, bw, bh - 13.0f);
+        float bh = kbH * 0.65f;
+        juce::Rectangle<float> br(bx, kbY + 14.0f, bw, bh - 14.0f);
 
         g.setColour(m == rootNote ? (FLColors::isAbletonSkin ? juce::Colour(0xff009ec2) : juce::Colour(0xff4c88d4))
-                                  : (m == previewHeldMidiNote ? FLColors::greenNeon() : juce::Colour(0xff23272e)));
+                                  : (m == previewHeldMidiNote ? FLColors::greenNeon() : juce::Colour(0xff1e2228)));
         g.fillRect(br);
         g.setColour(juce::Colour(0xff525a65));
         g.drawRect(br.reduced(1.2f, 1.2f), 0.7f);
     }
 
-    // Bottom scrollbar bar under keyboard + Key Region Bar (Left-drag in scrollbar or Shift+Right-click keys)
+    // Bottom scrollbar bar under keyboard with '<' and '>' arrows + central pill handle (1:1 Image 2)
     juce::Rectangle<int> scrollBar(bottomKeybRect.getX(), bottomKeybRect.getBottom(), bottomKeybRect.getWidth(), 12);
-    g.setColour(juce::Colour(0xff22262c));
+    g.setColour(juce::Colour(0xff2b3038));
     g.fillRect(scrollBar);
+
+    // Left '<' and Right '>' scrollbar arrows
+    g.setColour(juce::Colour(0xff9aa3ad));
+    g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    g.drawText("<", scrollBar.getX() + 2, scrollBar.getY(), 12, 12, juce::Justification::centred);
+    g.drawText(">", scrollBar.getRight() - 14, scrollBar.getY(), 12, 12, juce::Justification::centred);
 
     const int regLo = juce::jlimit(24, 96, audioProcessor.keyRegionLow.load());
     const int regHi = juce::jlimit(regLo, 96, audioProcessor.keyRegionHigh.load());
-    float rx0 = kbX + ((float)(regLo - 24) / 72.0f) * (float)bottomKeybRect.getWidth();
-    float rx1 = kbX + ((float)(regHi - 24 + 1) / 72.0f) * (float)bottomKeybRect.getWidth();
-    g.setColour(FLColors::orangeRing().withAlpha(0.85f));
-    g.fillRoundedRectangle(rx0, (float)scrollBar.getY() + 2.0f, juce::jmax(6.0f, rx1 - rx0), 8.0f, 2.0f);
+    if (regLo > 24 || regHi < 96)
+    {
+        float rx0 = kbX + ((float)(regLo - 24) / 72.0f) * kbW;
+        float rx1 = kbX + ((float)(regHi - 24 + 1) / 72.0f) * kbW;
+        g.setColour(FLColors::orangeRing().withAlpha(0.85f));
+        g.fillRoundedRectangle(rx0, (float)scrollBar.getY() + 3.0f, juce::jmax(6.0f, rx1 - rx0), 6.0f, 3.0f);
+    }
+    else
+    {
+        // Default central grey pill handle matching Image 2
+        g.setColour(juce::Colour(0xffadb5bf));
+        g.fillRoundedRectangle(kbX + kbW * 0.36f, (float)scrollBar.getY() + 4.0f, kbW * 0.14f, 4.0f, 2.0f);
+    }
 }
 
 void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
@@ -1017,17 +1705,8 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
     juce::Graphics::ScopedSaveState sss(g);
     g.addTransform(juce::AffineTransform::scale(scaleX, scaleY));
 
-    // Draw VOCESFX Skin 1 background image when PRIVATE skin (skinMode == 2) is active!
-    if (FLColors::isPrivateSkin && privateSkinBg.isValid())
-    {
-        g.drawImage(privateSkinBg, juce::Rectangle<float>(0.0f, 0.0f, (float)kDesignW, (float)kDesignH),
-                    juce::RectanglePlacement::stretchToFit);
-        g.setColour(juce::Colours::black.withAlpha(0.32f));
-        g.fillRect(0, 0, kDesignW, kDesignH);
-    }
-
     // 1. Top Header Bar (y: 0..42)
-    g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xd8140d1c) : FLColors::headerBg());
+    g.setColour(FLColors::headerBg());
     g.fillRect(0, 0, kDesignW, 42);
     g.setColour(FLColors::panelBorder());
     g.drawHorizontalLine(42, 0.0f, (float)kDesignW);
@@ -1039,91 +1718,110 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawRect(0, 0, kDesignW, kDesignH, 2);
     }
 
-    // Skin Switcher Button ("SKIN: FL" | "SKIN: LIVE" | "PRIVATE" | "SKIN: BLACK") on the right of the 3 tab icons!
+    // Skin Switcher Button ("SKIN: FL" -> "SKIN: FL DARK" -> "SKIN: LIVE" -> ...)
     {
         auto sr = skinToggleBtnRect.toFloat();
-        g.setColour(FLColors::recessedBg());
-        g.fillRoundedRectangle(sr, FLColors::skinMode == 1 ? 0.0f : 3.0f);
-        g.setColour(FLColors::skinMode > 0 ? FLColors::greenNeon() : FLColors::panelBorder());
-        g.drawRoundedRectangle(sr.reduced(0.5f), FLColors::skinMode == 1 ? 0.0f : 3.0f, 1.0f);
+        g.setColour(FLColors::isWin98Skin ? juce::Colour(0xffc0c0c0) : FLColors::recessedBg());
+        g.fillRoundedRectangle(sr, (FLColors::isAbletonSkin || FLColors::isWin98Skin) ? 0.0f : 3.0f);
+        g.setColour(FLColors::skinMode > 0 ? (FLColors::isWin98Skin ? juce::Colours::white : FLColors::greenNeon()) : FLColors::panelBorder());
+        g.drawRoundedRectangle(sr.reduced(0.5f), (FLColors::isAbletonSkin || FLColors::isWin98Skin) ? 0.0f : 3.0f, 1.0f);
 
-        g.setColour(FLColors::skinMode > 0 ? FLColors::greenNeon() : FLColors::textBright());
-        g.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
-        const char* skinNames[4] = { "SKIN: FL", "SKIN: LIVE", "PRIVATE", "SKIN: BLACK" };
-        g.drawText(skinNames[juce::jlimit(0, 3, FLColors::skinMode)], skinToggleBtnRect, juce::Justification::centred, false);
-
-        // Draw PAPIELGUAPO vector signature ONLY in the PRIVATE skin (omitted in all other skins!)
-        if (FLColors::isPrivateSkin && currentHintText.isEmpty())
-        {
-            FLColors::drawPapielguapoSignature(g, (float)skinToggleBtnRect.getRight() + 6.0f, 11.0f, 18.0f,
-                juce::Colour(0xffec4899));
-        }
+        g.setColour(FLColors::isWin98Skin ? juce::Colours::black : (FLColors::skinMode > 0 ? FLColors::greenNeon() : FLColors::textBright()));
+        g.setFont(juce::Font(juce::FontOptions(7.9f, juce::Font::bold)));
+        const char* skinNames[FLColors::kNumSkins] = {
+            "SKIN: FL", "SKIN: FL DARK", "SKIN: LIVE", "SKIN: LOGIC", "SKIN: PTOOLS", "SKIN: SEQUOIA", "SKIN: AUDITION",
+            "SKIN: CUBASE", "SKIN: REAPER", "SKIN: WINAMP", "SKIN: WIN98", "SKIN: MACOSX", "SKIN: BLACK", "SKIN: WHITE"
+        };
+        g.drawText(skinNames[juce::jlimit(0, FLColors::kNumSkins - 1, FLColors::skinMode)], skinToggleBtnRect, juce::Justification::centred, false);
     }
 
     // FL Hint Bar readout in header bar when active
     if (currentHintText.isNotEmpty())
     {
         g.setColour(FLColors::recessedBg().withAlpha(0.95f));
-        g.fillRoundedRectangle(198.0f, 9.0f, 118.0f, 24.0f, FLColors::skinMode == 1 ? 0.0f : 3.0f);
+        g.fillRoundedRectangle(198.0f, 9.0f, 118.0f, 24.0f, FLColors::isAbletonSkin ? 0.0f : 3.0f);
         g.setColour(FLColors::textDim());
         g.setFont(juce::Font(juce::FontOptions(9.5f)));
         g.drawText(currentHintText, 201, 9, 112, 24, juce::Justification::centredLeft, true);
     }
 
-    // 3 Left Sheet Tab Icons (Waveform, Envelope, Magnifying Glass / Lupa)
-    // Tab 0: Waveform icon
+    const juce::Colour hdrIconInactiveCol = FLColors::isWin98Skin ? juce::Colours::white : FLColors::textBright();
+    const juce::Colour hdrIconActiveCol   = FLColors::isWin98Skin ? juce::Colour(0xff00ffff) : FLColors::greenNeon();
+    const juce::Colour hdrTabActiveBg     = FLColors::isWin98Skin ? juce::Colour(0xff000050) : FLColors::recessedBg();
+
+    // 3 Left Sheet Tab Icons (1:1 Image 2: Filled Waveform, Curved AHDSR Nodes, Slanted Open-End Wrench)
+    // Tab 0: Symmetric Filled Waveform icon
     {
-        g.setColour(currentSheet == 0 ? FLColors::recessedBg() : juce::Colours::transparentBlack);
+        g.setColour(currentSheet == 0 ? hdrTabActiveBg : juce::Colours::transparentBlack);
         g.fillRect(tabRectWave);
 
-        juce::Path waveIcon;
-        float cx = (float)tabRectWave.getCentreX();
-        float cy = (float)tabRectWave.getCentreY();
-        waveIcon.startNewSubPath(cx - 11.0f, cy);
-        waveIcon.lineTo(cx - 6.0f, cy);
-        waveIcon.lineTo(cx - 3.5f, cy - 8.5f);
-        waveIcon.lineTo(cx - 0.5f, cy + 8.5f);
-        waveIcon.lineTo(cx + 2.5f, cy - 5.5f);
-        waveIcon.lineTo(cx + 5.0f, cy + 5.5f);
-        waveIcon.lineTo(cx + 7.5f, cy);
-        waveIcon.lineTo(cx + 11.0f, cy);
-        g.setColour(currentSheet == 0 ? FLColors::greenNeon() : juce::Colours::white);
-        g.strokePath(waveIcon, juce::PathStrokeType(2.0f));
+        const float cx = (float)tabRectWave.getCentreX();
+        const float cy = (float)tabRectWave.getCentreY();
+        juce::Path waveFill;
+        waveFill.startNewSubPath(cx - 11.5f, cy);
+        waveFill.lineTo(cx - 8.2f,  cy - 0.6f);
+        waveFill.lineTo(cx - 6.2f,  cy - 4.5f);
+        waveFill.lineTo(cx - 4.2f,  cy - 1.2f);
+        waveFill.lineTo(cx - 2.2f,  cy - 1.8f);
+        waveFill.lineTo(cx,         cy - 9.2f);
+        waveFill.lineTo(cx + 2.2f,  cy - 1.8f);
+        waveFill.lineTo(cx + 4.2f,  cy - 1.2f);
+        waveFill.lineTo(cx + 6.2f,  cy - 4.5f);
+        waveFill.lineTo(cx + 8.2f,  cy - 0.6f);
+        waveFill.lineTo(cx + 11.5f, cy);
+        waveFill.lineTo(cx + 8.2f,  cy + 0.6f);
+        waveFill.lineTo(cx + 6.2f,  cy + 4.5f);
+        waveFill.lineTo(cx + 4.2f,  cy + 1.2f);
+        waveFill.lineTo(cx + 2.2f,  cy + 1.8f);
+        waveFill.lineTo(cx,         cy + 9.2f);
+        waveFill.lineTo(cx - 2.2f,  cy + 1.8f);
+        waveFill.lineTo(cx - 4.2f,  cy + 1.2f);
+        waveFill.lineTo(cx - 6.2f,  cy + 4.5f);
+        waveFill.lineTo(cx - 8.2f,  cy + 0.6f);
+        waveFill.closeSubPath();
+
+        g.setColour(currentSheet == 0 ? hdrIconActiveCol : hdrIconInactiveCol);
+        g.fillPath(waveFill);
     }
 
-    // Tab 1: Envelope / Instrument icon
+    // Tab 1: Envelope / Instrument icon (3 hollow circle nodes + straight attack & curved exponential decay)
     {
-        g.setColour(currentSheet == 1 ? FLColors::recessedBg() : juce::Colours::transparentBlack);
+        g.setColour(currentSheet == 1 ? hdrTabActiveBg : juce::Colours::transparentBlack);
         g.fillRect(tabRectEnv);
 
-        juce::Path envIcon;
-        float x0 = (float)tabRectEnv.getX() + 12.0f;
-        float y0 = (float)tabRectEnv.getBottom() - 10.0f;
-        envIcon.startNewSubPath(x0, y0);
-        envIcon.lineTo(x0 + 5.0f, y0 - 15.0f);
-        envIcon.lineTo(x0 + 11.0f, y0 - 4.0f);
-        envIcon.lineTo(x0 + 18.0f, y0);
-        g.setColour(currentSheet == 1 ? FLColors::greenNeon() : juce::Colours::white);
-        g.strokePath(envIcon, juce::PathStrokeType(1.6f));
-        g.drawEllipse(x0 - 2.0f, y0 - 2.0f, 4.0f, 4.0f, 1.4f);
-        g.drawEllipse(x0 + 3.0f, y0 - 17.0f, 4.0f, 4.0f, 1.4f);
-        g.drawEllipse(x0 + 16.0f, y0 - 2.0f, 4.0f, 4.0f, 1.4f);
+        const float cx = (float)tabRectEnv.getCentreX();
+        const float cy = (float)tabRectEnv.getCentreY();
+        const juce::Point<float> p1(cx - 6.5f, cy + 6.5f);
+        const juce::Point<float> p2(cx - 3.5f, cy - 7.5f);
+        const juce::Point<float> p3(cx + 6.5f, cy + 6.5f);
+
+        juce::Path envCurve;
+        envCurve.startNewSubPath(p1.x + 0.6f, p1.y - 2.5f);
+        envCurve.lineTo(p2.x - 0.5f, p2.y + 2.5f);
+        envCurve.startNewSubPath(p2.x + 0.8f, p2.y + 2.4f);
+        envCurve.quadraticTo(p2.x + 2.2f, p3.y - 1.5f, p3.x - 2.4f, p3.y - 0.5f);
+
+        g.setColour(currentSheet == 1 ? hdrIconActiveCol : hdrIconInactiveCol);
+        g.strokePath(envCurve, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.drawEllipse(p1.x - 2.5f, p1.y - 2.5f, 5.0f, 5.0f, 1.7f);
+        g.drawEllipse(p2.x - 2.5f, p2.y - 2.5f, 5.0f, 5.0f, 1.7f);
+        g.drawEllipse(p3.x - 2.5f, p3.y - 2.5f, 5.0f, 5.0f, 1.7f);
     }
 
-    // Tab 2: Magnifying Glass (Lupa) icon (Misc functions)
+    // Tab 2: Open-End Wrench icon (Misc functions - 1:1 Image 3)
     {
-        g.setColour(currentSheet == 2 ? FLColors::recessedBg() : juce::Colours::transparentBlack);
+        const juce::Colour bgCol = (currentSheet == 2) ? hdrTabActiveBg : FLColors::headerBg();
+        g.setColour(currentSheet == 2 ? hdrTabActiveBg : juce::Colours::transparentBlack);
         g.fillRect(tabRectFunc);
 
-        const float lupaX = (float)tabRectFunc.getCentreX() - 6.5f;
-        const float lupaY = (float)tabRectFunc.getCentreY() - 6.5f;
-        g.setColour(currentSheet == 2 ? FLColors::greenNeon() : juce::Colours::white);
-        g.drawEllipse(lupaX, lupaY, 10.5f, 10.5f, 1.8f);
-        g.drawLine(lupaX + 8.8f, lupaY + 8.8f, lupaX + 13.8f, lupaY + 13.8f, 2.2f);
+        const float cx = (float)tabRectFunc.getCentreX();
+        const float cy = (float)tabRectFunc.getCentreY();
+        const juce::Colour wrenchCol = (currentSheet == 2) ? hdrIconActiveCol : hdrIconInactiveCol;
+        drawFLOpenWrenchIcon(g, cx, cy, 1.0f, wrenchCol, bgCol);
     }
 
     // Master Header Labels (ON, PAN, VOL, PITCH, RANGE, TRACK)
-    g.setColour(FLColors::textBright());
+    g.setColour(hdrIconInactiveCol);
     g.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
     g.drawText("ON",    masterOnBtn.getX() - 6, 30, 24, 11, juce::Justification::centred);
     g.drawText("PAN",   masterPanKnob.getX() - 4, 30, masterPanKnob.getWidth() + 8, 11, juce::Justification::centred);
@@ -1142,7 +1840,7 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawText("File", 16, 58, 28, 20, juce::Justification::centredLeft, false);
 
         g.setColour(FLColors::textDim());
-        g.drawText(audioProcessor.getLoadedFileName(), fileNameBoxRect, juce::Justification::centredLeft, true);
+        g.drawText(audioProcessor.getCachedFileName(), fileNameBoxRect, juce::Justification::centredLeft, true);
 
         auto drawIconBtn = [&](juce::Rectangle<int> r, int iconType)
         {
@@ -1174,13 +1872,6 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         drawIconBtn(removeFileBtnRect, 2);
         drawIconBtn(locateFileBtnRect, 1);
 
-        // PAPIELGUAPO signature to the right of the Lupa button in the File bar ONLY in PRIVATE skin!
-        if (FLColors::isPrivateSkin)
-        {
-            FLColors::drawPapielguapoSignature(g, (float)locateFileBtnRect.getRight() + 4.0f, (float)locateFileBtnRect.getY() + 5.0f, 14.0f,
-                juce::Colour(0xffec4899));
-        }
-
         // Content Panel (x=6, y=94, w=252, h=106)
         drawFLPanel(g, { 6, 94, 252, 106 }, "Content");
         g.setColour(FLColors::textBright());
@@ -1206,23 +1897,71 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         drawSmallCapLabel(g, stretchPitchKnob, "PITCH");
         drawSmallCapLabel(g, stretchMulKnob,   "MUL");
         drawSmallCapLabel(g, stretchTimeKnob,  "TIME");
-        drawSmallCapLabel(g, formantShiftKnob, "FMT");
         g.setColour(FLColors::textBright());
-        g.setFont(juce::Font(juce::FontOptions(11.5f)));
-        g.drawText("Mode", 422, 64, 38, 16, juce::Justification::centredLeft, false);
+        g.setFont(juce::Font(juce::FontOptions(12.0f)));
+        g.drawText("Mode", 384, 72, 38, 18, juce::Justification::centredLeft, false);
+        if (formantShiftKnob.isVisible())
+        {
+            g.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
+            g.drawText("FORMANT", 380, 101, 46, 18, juce::Justification::centredLeft, false);
+        }
 
         // Precomputed Effects Panel (x=264, y=138, w=256, h=152)
         drawFLPanel(g, { 264, 138, 256, 152 }, "Precomputed effects", 56);
 
-        // Wrench & Bulb sub-tab icons on the left of "Precomputed effects" title
-        g.setColour(!legacyPrecomputedTab ? juce::Colours::white : FLColors::textDim());
-        g.drawLine((float)fxSubTabWrench.getX() + 4.0f, (float)fxSubTabWrench.getBottom() - 4.0f,
-                   (float)fxSubTabWrench.getRight() - 4.0f, (float)fxSubTabWrench.getY() + 4.0f, 2.0f);
+        // Wrench & Vacuum Tube sub-tab icons on the left of "Precomputed effects" title (1:1 Image 1 & Image 2)
+        {
+            const juce::Colour subTabActBg = FLColors::isWin98Skin ? juce::Colour(0xff000050) : FLColors::recessedBg();
+            const juce::Colour subTabInactBg = FLColors::isWin98Skin ? juce::Colour(0xff000080) : FLColors::panelBg();
+            const juce::Colour wBgCol = !legacyPrecomputedTab ? subTabActBg : subTabInactBg;
+            const juce::Colour bBgCol = legacyPrecomputedTab  ? subTabActBg : subTabInactBg;
+            const juce::Colour inactIconCol = FLColors::isWin98Skin ? juce::Colours::white : FLColors::textBright();
+            g.setColour(!legacyPrecomputedTab ? subTabActBg : juce::Colours::transparentBlack);
+            g.fillRect(fxSubTabWrench);
+            g.setColour(legacyPrecomputedTab ? subTabActBg : juce::Colours::transparentBlack);
+            g.fillRect(fxSubTabBulb);
 
-        g.setColour(legacyPrecomputedTab ? FLColors::orangeRing() : FLColors::textDim());
-        g.drawEllipse((float)fxSubTabBulb.getCentreX() - 4.0f, (float)fxSubTabBulb.getY() + 2.0f, 8.0f, 9.0f, 1.5f);
-        g.drawLine((float)fxSubTabBulb.getCentreX() - 2.0f, (float)fxSubTabBulb.getBottom() - 3.0f,
-                   (float)fxSubTabBulb.getCentreX() + 2.0f, (float)fxSubTabBulb.getBottom() - 3.0f, 1.5f);
+            // 1. Slanted Open-End Wrench icon (Gold-yellow when active, clean C-jaw without self-intersection)
+            const float wcx = (float)fxSubTabWrench.getCentreX();
+            const float wcy = (float)fxSubTabWrench.getCentreY();
+            const juce::Colour wCol = !legacyPrecomputedTab ? juce::Colour(0xffffb82e) : inactIconCol;
+            drawFLOpenWrenchIcon(g, wcx, wcy, 0.78f, wCol, wBgCol);
+
+            // 2. Vintage Vacuum Tube / Valve icon (Solid white/bright when inactive, solid gold-yellow when selected — matching the Wrench icon!)
+            const float bcx = (float)fxSubTabBulb.getCentreX();
+            const float bcy = (float)fxSubTabBulb.getCentreY();
+            const juce::Colour bCol = legacyPrecomputedTab ? juce::Colour(0xffffb82e) : inactIconCol;
+
+            // Outer glass silhouette with top exhaust pip & rounded shoulders
+            juce::Path tubeOuter;
+            tubeOuter.startNewSubPath(bcx, bcy - 6.8f);
+            tubeOuter.lineTo(bcx + 1.4f, bcy - 5.2f);
+            tubeOuter.quadraticTo(bcx + 4.4f, bcy - 4.4f, bcx + 4.4f, bcy - 1.8f);
+            tubeOuter.lineTo(bcx + 4.4f, bcy + 3.0f);
+            tubeOuter.lineTo(bcx - 4.4f, bcy + 3.0f);
+            tubeOuter.lineTo(bcx - 4.4f, bcy - 1.8f);
+            tubeOuter.quadraticTo(bcx - 4.4f, bcy - 4.4f, bcx - 1.4f, bcy - 5.2f);
+            tubeOuter.closeSubPath();
+
+            g.setColour(bCol);
+            g.fillPath(tubeOuter);
+
+            // Inner cutout chamber below the dome
+            juce::Rectangle<float> chamber(bcx - 3.0f, bcy - 2.4f, 6.0f, 5.2f);
+            g.setColour(bBgCol);
+            g.fillRoundedRectangle(chamber, 1.0f);
+
+            // Vertical cathode/anode filaments inside the chamber in solid bCol
+            g.setColour(bCol);
+            g.fillRect(bcx - 1.7f, bcy - 1.5f, 1.0f, 3.8f);
+            g.fillRect(bcx - 0.3f, bcy - 1.8f, 1.1f, 4.1f);
+            g.fillRect(bcx + 1.1f, bcy - 1.5f, 0.9f, 3.8f);
+
+            // Bottom pinch/stem + horizontal base ring & contact tip in solid bCol
+            g.fillRect(bcx - 1.8f, bcy + 2.4f, 3.6f, 1.3f);
+            g.fillRoundedRectangle(bcx - 3.0f, bcy + 4.2f, 6.0f, 1.5f, 0.7f);
+            g.fillRect(bcx - 1.1f, bcy + 5.7f, 2.2f, 1.1f);
+        }
 
         if (!legacyPrecomputedTab)
         {
@@ -1290,45 +2029,82 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
         {
             drawFLPanel(g, { 6, 82, 268, 216 }, "");
 
+            // Top-right preset dropdown triangle icon (matching Image 2 & Image 3)
+            {
+                juce::Path presetArrow;
+                const float ax = (float)envPresetBtnRect.getCentreX();
+                const float ay = (float)envPresetBtnRect.getCentreY();
+                presetArrow.addTriangle(ax - 4.0f, ay - 2.0f, ax + 4.0f, ay - 2.0f, ax, ay + 2.8f);
+                g.setColour(FLColors::textBright());
+                g.fillPath(presetArrow);
+            }
+
             // Dark recessed envelope graph box
             juce::Rectangle<int> envGraph(14, 106, 252, 86);
             g.setColour(FLColors::recessedBg());
             g.fillRect(envGraph);
 
-            // Draw AHDSR curve with tension & circular nodes in target color
-            float d   = (float)envDelayKnob.getValue() * 35.0f;
-            float a   = (float)envAttackKnob.getValue() * 55.0f;
-            float h   = (float)envHoldKnob.getValue() * 40.0f;
-            float dec = (float)envDecayKnob.getValue() * 55.0f;
+            // Draw AHDSR curve with tension & circular nodes in target color (1:1 Image 1 for Volume vs Mod/Pitch)
+            float d   = (float)envDelayKnob.getValue() * 52.0f;
+            float a   = (float)envAttackKnob.getValue() * 88.0f;
+            float h   = (float)envHoldKnob.getValue() * 80.0f;
+            float dec = (float)envDecayKnob.getValue() * 68.0f;
             float sus = (float)envSustainKnob.getValue();
-            float rel = (float)envReleaseKnob.getValue() * 50.0f;
+            float rel = (float)envReleaseKnob.getValue() * 72.0f;
 
-            float x0 = (float)envGraph.getX() + 4.0f;
-            float yBot = (float)envGraph.getBottom() - 4.0f;
-            float yTop = (float)envGraph.getY() + 4.0f;
+            float x0   = (float)envGraph.getX() + 3.0f;
+            float yBot = (float)envGraph.getBottom() - 2.0f;
+            float yTop = (float)envGraph.getY() + 2.0f;
 
-            // When Envelope is disabled (Mod X/Y/Pitch screenshots), show flat line with nodes at bottom
-            const bool isEnvActive = volEnvOnBtn.getToggleState() || (currentInsTarget == 1);
-            float yPeak = isEnvActive ? yTop : yBot;
-            float ySus  = isEnvActive ? (yBot - sus * (yBot - yTop)) : yBot;
+            // Volume envelope always renders its full green AHDSR shape (Image 1);
+            // Mod X / Mod Y / Pitch render flat at bottom when disabled or AMT == 0 (Image 3).
+            const bool isVolTarget = (currentInsTarget == 1);
+            const float amtVal = isVolTarget ? 1.0f : (float)envAmountKnob.getValue();
+            const bool isEnvActive = isVolTarget ? true : (volEnvOnBtn.getToggleState() && std::abs(amtVal) > 0.001f);
+
+            // Draw grey reference frame box in background ONLY for Mod X / Mod Y / Pitch
+            if (!isVolTarget)
+            {
+                g.setColour(FLColors::isWhiteSkin ? juce::Colour(0xffcbd5e1) : juce::Colour(0xff3e4652));
+                const float refW = 84.0f;
+                g.drawLine(x0, yBot, x0, yTop, 1.2f);
+                g.drawLine(x0, yTop, x0 + refW, yTop, 1.2f);
+                g.drawLine(x0 + refW, yTop, x0 + refW, yBot, 1.2f);
+                g.drawLine(x0, yBot, x0 + refW + 26.0f, yBot, 1.2f);
+            }
+
+            float yPeak = isEnvActive ? (yBot - std::abs(amtVal) * (yBot - yTop)) : yBot;
+            float ySus  = isEnvActive ? (yBot - (sus * std::abs(amtVal)) * (yBot - yTop)) : yBot;
 
             float x1 = x0 + d;
-            float x2 = x1 + juce::jmax(18.0f, a);
-            float x3 = x2 + juce::jmax(18.0f, h);
-            float x4 = x3 + juce::jmax(18.0f, dec);
-            float x5 = x4 + juce::jmax(18.0f, rel);
+            float x2 = x1 + a;
+            float x3 = x2 + h;
+            float x4 = x3 + dec;
+            float x5 = x4 + ((rel < 0.5f && dec < 0.5f && h > 2.0f) ? 24.0f : rel);
 
-            const float attTens = (float)envAttTensionKnob.getValue();
-            const float decTens = (float)envDecTensionKnob.getValue();
-            const float relTens = (float)envRelTensionKnob.getValue();
+            const float attTens = isEnvActive ? (float)envAttTensionKnob.getValue() : 0.0f;
+            const float decTens = isEnvActive ? (float)envDecTensionKnob.getValue() : 0.0f;
+            const float relTens = isEnvActive ? (float)envRelTensionKnob.getValue() : 0.0f;
 
             juce::Path p;
             p.startNewSubPath(x0, yBot);
             p.lineTo(x1, yBot);
-            p.quadraticTo((x1 + x2) * 0.5f, (yBot + yPeak) * 0.5f - attTens * 22.0f, x2, yPeak);
+            if (a < 1.0f)
+                p.lineTo(x2, yPeak);
+            else
+                p.quadraticTo((x1 + x2) * 0.5f, (yBot + yPeak) * 0.5f - attTens * 22.0f, x2, yPeak);
+
             p.lineTo(x3, yPeak);
-            p.quadraticTo((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f - decTens * 22.0f, x4, ySus);
-            p.quadraticTo((x4 + x5) * 0.5f, (ySus + yBot) * 0.5f - relTens * 22.0f, x5, yBot);
+
+            if (dec < 1.0f)
+                p.lineTo(x4, ySus);
+            else
+                p.quadraticTo((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f - decTens * 22.0f, x4, ySus);
+
+            if ((x5 - x4) < 1.0f || std::abs(ySus - yBot) < 0.5f)
+                p.lineTo(x5, yBot);
+            else
+                p.quadraticTo((x4 + x5) * 0.5f, (ySus + yBot) * 0.5f - relTens * 22.0f, x5, yBot);
 
             g.setColour(activeCol);
             g.strokePath(p, juce::PathStrokeType(1.8f));
@@ -1345,18 +2121,22 @@ void FLSamplerAudioProcessorEditor::paint(juce::Graphics& g)
                 g.drawVerticalLine((int)cursorX, (float)envGraph.getY(), (float)envGraph.getBottom());
             }
 
-            auto drawNode = [&](float nx, float ny)
             {
-                g.setColour(FLColors::recessedBg());
-                g.fillEllipse(nx - 3.0f, ny - 3.0f, 6.0f, 6.0f);
-                g.setColour(activeCol);
-                g.drawEllipse(nx - 3.0f, ny - 3.0f, 6.0f, 6.0f, 1.5f);
-            };
-            drawNode(x1, yBot);
-            drawNode(x2, yPeak);
-            drawNode(x3, yPeak);
-            drawNode((x3 + x4) * 0.5f, (yPeak + ySus) * 0.5f - decTens * 11.0f);
-            drawNode(x5, yBot);
+                juce::Graphics::ScopedSaveState clipState(g);
+                g.reduceClipRegion(envGraph);
+                auto drawNode = [&](float nx, float ny)
+                {
+                    g.setColour(FLColors::recessedBg());
+                    g.fillEllipse(nx - 3.5f, ny - 3.5f, 7.0f, 7.0f);
+                    g.setColour(activeCol);
+                    g.drawEllipse(nx - 3.5f, ny - 3.5f, 7.0f, 7.0f, 1.6f);
+                };
+                drawNode(x1, yBot);
+                drawNode(x2, yPeak);
+                drawNode(x3, yPeak);
+                drawNode(x4, ySus);
+                drawNode(x5, yBot);
+            }
 
             drawSmallCapLabel(g, envDelayKnob,   "DELAY");
             drawSmallCapLabel(g, envAttackKnob,  "ATT");
@@ -1555,11 +2335,11 @@ void FLSamplerAudioProcessorEditor::resized()
     tabRectFunc       = { 88,  2, 42, 38 };
     skinToggleBtnRect = { 136, 9, 56, 24 }; // Placed immediately to the right of the Tab 2 Lupa icon (x=88..130)!
 
-    masterOnBtn.setBounds(320, 10, 16, 16);
-    masterPanKnob.setBounds(346, 2, 28, 28);
-    masterVolKnob.setBounds(376, 2, 28, 28);
-    masterPitchKnob.setBounds(412, 2, 28, 28);
-    pitchRangeBox.setBounds(438, 5, 28, 22);
+    masterOnBtn.setBounds(316, 10, 16, 16);
+    masterPanKnob.setBounds(342, 2, 28, 28);
+    masterVolKnob.setBounds(372, 2, 28, 28);
+    masterPitchKnob.setBounds(406, 2, 28, 28);
+    pitchRangeBox.setBounds(444, 5, 28, 22);
     trackBox.setBounds(484, 5, 36, 22);
 
     // ==================== SHEET 0: SAMPLE SETTINGS ====================
@@ -1579,15 +2359,15 @@ void FLSamplerAudioProcessorEditor::resized()
     startOffsetKnob.setBounds(24, 232, 36, 36);
     loopStartKnob.setBounds(76, 232, 36, 36);
     loopEndKnob.setBounds(116, 232, 36, 36);
-    useLoopPointsBtn.setBounds(162, 234, 92, 18);
-    pingPongLoopBtn.setBounds(162, 258, 92, 18);
+    useLoopPointsBtn.setBounds(158, 234, 98, 18);
+    pingPongLoopBtn.setBounds(158, 258, 98, 18);
 
     // Time Stretching Panel (x=264, y=48, w=256, h=86)
     stretchPitchKnob.setBounds(272, 76, 34, 34);
     stretchMulKnob.setBounds(308, 76, 34, 34);
     stretchTimeKnob.setBounds(344, 76, 34, 34);
-    formantShiftKnob.setBounds(380, 76, 34, 34);
-    stretchModeCombo.setBounds(420, 82, 92, 24);
+    stretchModeCombo.setBounds(424, 69, 90, 24);
+    formantShiftKnob.setBounds(424, 98, 90, 24);
 
     // Precomputed Effects Panel (x=264, y=138, w=256, h=152)
     fxSubTabWrench = { 270, 141, 20, 18 };
@@ -1600,12 +2380,12 @@ void FLSamplerAudioProcessorEditor::resized()
     reverseBtn.setBounds(272, 210, 118, 18);
     swapStereoBtn.setBounds(396, 210, 118, 18);
 
-    smpStartKnob.setBounds(274,  236, 34, 34);
-    lengthKnob.setBounds(314,    236, 34, 34);
+    smpStartKnob.setBounds(270,  236, 34, 34);
+    lengthKnob.setBounds(313,    236, 34, 34);
     fadeInKnob.setBounds(354,    236, 34, 34);
     fadeOutKnob.setBounds(394,   236, 34, 34);
     crossfadeKnob.setBounds(434, 236, 34, 34);
-    trimKnob.setBounds(474,      236, 34, 34);
+    trimKnob.setBounds(478,      236, 34, 34);
 
     // Legacy Precomputed Knobs (Bulb Sub-tab matching Screenshot 1)
     boostKnob.setBounds(276,       172, 34, 34);
@@ -1632,6 +2412,7 @@ void FLSamplerAudioProcessorEditor::resized()
     insTargetRects[4] = { 206, 52, 42, 22 };
 
     volEnvOnBtn.setBounds(12, 84, 90, 18);
+    envPresetBtnRect = { 252, 84, 18, 18 };
     envDelayKnob.setBounds(16,   198, 32, 32);
     envAttackKnob.setBounds(50,  198, 32, 32);
     envHoldKnob.setBounds(84,    198, 32, 32);
@@ -1663,8 +2444,9 @@ void FLSamplerAudioProcessorEditor::resized()
     // Shared Bottom Root Note & Keyboard Panel (x=6, y=304, w=514, h=146)
     resetRootBtnRect   = { 14, 328, 44, 22 };
     enableMainPitchBtn.setBounds(68, 330, 114, 18);
-    addToKeyBtn.setBounds(184, 330, 72, 18);
-    fineTuneSlider.setBounds(314, 328, 96, 22);
+    addToKeyBtn.setBounds(184, 330, 74, 18);
+    fineTuneSlider.setBounds(328, 328, 96, 22);
+    keybHandBtnRect    = { 482, 326, 36, 26 };
     bottomKeybRect     = { 10, 356, 506, 80 };
 
     // ==================== SHEET 2: MISCELLANEOUS FUNCTIONS ====================
@@ -1739,71 +2521,149 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             m.addItem(10, "Load sample file...");
             m.addItem(11, "Next sample in folder");
             m.addItem(12, "Previous sample in folder");
-            m.addItem(13, "Detect pitch & set root note");
-            m.addItem(14, "Auto-detect loop points");
             m.addSeparator();
+
+            const int curResamp = (int)std::round(audioProcessor.apvts.getRawParameterValue("resamplingQuality")->load());
+            juce::PopupMenu resampMenu;
+            resampMenu.addSectionHeader("Low quality / fastest");
+            resampMenu.addItem(40, "2-point linear",  true, curResamp == 0);
+            resampMenu.addItem(41, "6-point Hermite", true, curResamp == 1);
+            resampMenu.addSeparator();
+            resampMenu.addSectionHeader("Average quality");
+            resampMenu.addItem(42, "16-point sinc",   true, curResamp == 2);
+            resampMenu.addItem(43, "24-point sinc (Default)", true, curResamp == 3);
+            resampMenu.addItem(44, "32-point sinc",   true, curResamp == 4);
+            resampMenu.addSeparator();
+            resampMenu.addSectionHeader("High quality / slowest");
+            resampMenu.addItem(45, "64-point sinc",   true, curResamp == 5);
+            resampMenu.addItem(46, "128-point sinc",  true, curResamp == 6);
+            resampMenu.addItem(47, "256-point sinc",  true, curResamp == 7);
+            resampMenu.addItem(48, "512-point sinc",  true, curResamp == 8);
+            m.addSubMenu("FL Resampling Quality", resampMenu);
+
             juce::PopupMenu skinMenu;
             skinMenu.addItem(20, "SKIN: FL Studio 2026", true, FLColors::skinMode == 0);
-            skinMenu.addItem(21, "SKIN: Ableton Live 12", true, FLColors::skinMode == 1);
-            skinMenu.addItem(22, "PRIVATE (VOCESFX + PAPIELGUAPO)", true, FLColors::skinMode == 2);
-            skinMenu.addItem(23, "SKIN: BLACK Stealth", true, FLColors::skinMode == 3);
+            skinMenu.addItem(21, "SKIN: FL Studio Dark", true, FLColors::skinMode == 1);
+            skinMenu.addItem(22, "SKIN: Ableton Live 12", true, FLColors::skinMode == 2);
+            skinMenu.addItem(23, "SKIN: Apple Logic Pro X", true, FLColors::skinMode == 3);
+            skinMenu.addItem(24, "SKIN: Avid Pro Tools", true, FLColors::skinMode == 4);
+            skinMenu.addItem(25, "SKIN: MAGIX Sequoia", true, FLColors::skinMode == 5);
+            skinMenu.addItem(26, "SKIN: Adobe Audition", true, FLColors::skinMode == 6);
+            skinMenu.addItem(27, "SKIN: Steinberg Cubase 14", true, FLColors::skinMode == 7);
+            skinMenu.addItem(28, "SKIN: Cockos REAPER 7", true, FLColors::skinMode == 8);
+            skinMenu.addItem(29, "SKIN: Winamp Classic 2.x", true, FLColors::skinMode == 9);
+            skinMenu.addItem(30, "SKIN: Windows 98 Classic", true, FLColors::skinMode == 10);
+            skinMenu.addItem(31, "SKIN: Mac OS X Aqua", true, FLColors::skinMode == 11);
+            skinMenu.addItem(32, "SKIN: BLACK Stealth", true, FLColors::skinMode == 12);
+            skinMenu.addItem(33, "SKIN: WHITE Studio", true, FLColors::skinMode == 13);
             m.addSubMenu("Skin / Theme", skinMenu);
 
-            m.showMenuAsync(juce::PopupMenu::Options(), [this](int res)
+            juce::Component::SafePointer<FLSamplerAudioProcessorEditor> safeThis(this);
+            m.showMenuAsync(juce::PopupMenu::Options(), [safeThis](int res)
             {
+                if (safeThis == nullptr)
+                    return;
+                auto* self = safeThis.getComponent();
                 if (res >= 1 && res <= 3)
                 {
-                    updateActiveSheet(res - 1);
+                    self->updateActiveSheet(res - 1);
                 }
                 else if (res == 10)
                 {
-                    openSampleFileChooser();
+                    self->openSampleFileChooser();
                 }
                 else if (res == 11 || res == 12)
                 {
-                    audioProcessor.stepFolderSample(res == 11 ? 1 : -1);
-                    wavScope.refreshIfNeeded();
-                    setHintText("Loaded: " + audioProcessor.getLoadedFileName());
-                    repaint();
+                    self->audioProcessor.stepFolderSample(res == 11 ? 1 : -1);
+                    self->wavScope.refreshIfNeeded();
+                    self->setHintText("Loaded: " + self->audioProcessor.getLoadedFileName());
+                    self->repaint();
                 }
-                else if (res == 13)
-                {
-                    const int root = audioProcessor.getDetectedSampleRootNote();
-                    if (auto* p = audioProcessor.apvts.getParameter("rootNote"))
-                        p->setValueNotifyingHost(p->convertTo0to1((float)root));
-                    setHintText("Detected root note: MIDI " + juce::String(root));
-                    repaint();
-                }
-                else if (res == 14)
-                {
-                    if (auto* p = audioProcessor.apvts.getParameter("useLoop"))
-                        p->setValueNotifyingHost(1.0f);
-                    setHintText("Loop points enabled");
-                    repaint();
-                }
-                else if (res >= 20 && res <= 23)
+                else if (res >= 20 && res <= 33)
                 {
                     FLColors::setSkinMode(res - 20);
-                    flLookAndFeel.refreshThemeColours();
-                    contentCanvas.repaint();
-                    repaint();
+                    self->flLookAndFeel.refreshThemeColours();
+                    self->contentCanvas.repaint();
+                    self->repaint();
+                }
+                else if (res >= 40 && res <= 48)
+                {
+                    const int qIdx = res - 40;
+                    if (auto* p = self->audioProcessor.apvts.getParameter("resamplingQuality"))
+                        p->setValueNotifyingHost(p->convertTo0to1((float)qIdx));
+                    static const char* kQualityNames[9] = {
+                        "2-point linear", "6-point Hermite", "16-point sinc",
+                        "24-point sinc", "32-point sinc", "64-point sinc",
+                        "128-point sinc", "256-point sinc", "512-point sinc"
+                    };
+                    self->setHintText("FL Resampling Quality: " + juce::String(kQualityNames[qIdx]));
+                    self->repaint();
                 }
             });
             return;
         }
         updateActiveSheet(2);
-        setHintText("Miscellaneous functions (click again or right-click for Lupa menu)");
+        setHintText("Miscellaneous functions (click again or right-click for quick menu)");
         return;
     }
     if (skinToggleBtnRect.contains(pt))
     {
-        const int nextSkin = (FLColors::skinMode + 1) % 4;
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu skinMenu;
+            skinMenu.addSectionHeader("Select Skin / Theme");
+            skinMenu.addItem(20, "1. FL Studio 2026 (Default)", true, FLColors::skinMode == 0);
+            skinMenu.addItem(21, "2. FL Studio Dark Theme", true, FLColors::skinMode == 1);
+            skinMenu.addItem(22, "3. Ableton Live 12", true, FLColors::skinMode == 2);
+            skinMenu.addItem(23, "4. Apple Logic Pro X", true, FLColors::skinMode == 3);
+            skinMenu.addItem(24, "5. Avid Pro Tools", true, FLColors::skinMode == 4);
+            skinMenu.addItem(25, "6. MAGIX Sequoia", true, FLColors::skinMode == 5);
+            skinMenu.addItem(26, "7. Adobe Audition", true, FLColors::skinMode == 6);
+            skinMenu.addItem(27, "8. Steinberg Cubase 14", true, FLColors::skinMode == 7);
+            skinMenu.addItem(28, "9. Cockos REAPER 7", true, FLColors::skinMode == 8);
+            skinMenu.addItem(29, "10. Winamp Classic 2.x", true, FLColors::skinMode == 9);
+            skinMenu.addSeparator();
+            skinMenu.addItem(30, "11. Microsoft Windows 98 Classic", true, FLColors::skinMode == 10);
+            skinMenu.addItem(31, "12. Apple Mac OS X Aqua", true, FLColors::skinMode == 11);
+            skinMenu.addSeparator();
+            skinMenu.addItem(32, "13. BLACK Stealth", true, FLColors::skinMode == 12);
+            skinMenu.addItem(33, "14. WHITE Studio", true, FLColors::skinMode == 13);
+            juce::Component::SafePointer<FLSamplerAudioProcessorEditor> safeThis(this);
+            skinMenu.showMenuAsync(juce::PopupMenu::Options(), [safeThis](int res)
+            {
+                if (safeThis == nullptr)
+                    return;
+                if (res >= 20 && res <= 33)
+                {
+                    FLColors::setSkinMode(res - 20);
+                    safeThis->flLookAndFeel.refreshThemeColours();
+                    safeThis->contentCanvas.repaint();
+                    safeThis->repaint();
+                }
+            });
+            return;
+        }
+
+        const int nextSkin = (FLColors::skinMode + 1) % FLColors::kNumSkins;
         FLColors::setSkinMode(nextSkin);
         flLookAndFeel.refreshThemeColours();
-        setHintText(nextSkin == 0 ? "Skin: FL Studio 2026 Look"
-                  : (nextSkin == 1 ? "Skin: Ableton Live 12 Look"
-                  : (nextSkin == 2 ? "Skin: PRIVATE (VOCESFX + GrowthTune)"
-                                   : "Skin: BLACK (Pure Pitch-Black Stealth)")));
+        static const char* kSkinHints[FLColors::kNumSkins] = {
+            "Skin: FL Studio 2026 Look",
+            "Skin: FL Studio Dark Theme",
+            "Skin: Ableton Live 12 Look",
+            "Skin: Apple Logic Pro X Quick Sampler",
+            "Skin: Avid Pro Tools Insert Rack",
+            "Skin: MAGIX Sequoia Mastering Suite",
+            "Skin: Adobe Audition Spectral / Waveform Look",
+            "Skin: Steinberg Cubase 14 Sampler Track",
+            "Skin: Cockos REAPER 7 TCP Look",
+            "Skin: Winamp Classic 2.x (Nullsoft)",
+            "Skin: Microsoft Windows 98 Classic",
+            "Skin: Apple Mac OS X Aqua",
+            "Skin: BLACK (Pure Pitch-Black Stealth)",
+            "Skin: WHITE (Pure White Studio)"
+        };
+        setHintText(kSkinHints[juce::jlimit(0, FLColors::kNumSkins - 1, nextSkin)]);
         contentCanvas.repaint();
         repaint();
         return;
@@ -1813,25 +2673,29 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
     {
         if (openFileBtnRect.contains(pt) || fileNameBoxRect.contains(pt))
         {
-            if (e.mods.isPopupMenu() && !audioProcessor.recentSampleFiles.isEmpty())
+            const auto recentFiles = audioProcessor.getRecentSamplePaths();
+            if (e.mods.isPopupMenu() && !recentFiles.isEmpty())
             {
                 juce::PopupMenu m;
                 m.addSectionHeader("Recent Sample Files");
-                for (int i = 0; i < audioProcessor.recentSampleFiles.size(); ++i)
-                    m.addItem(100 + i, juce::File(audioProcessor.recentSampleFiles[i]).getFileName());
-                m.showMenuAsync(juce::PopupMenu::Options(), [this](int res)
+                for (int i = 0; i < recentFiles.size(); ++i)
+                    m.addItem(100 + i, juce::File(recentFiles[i]).getFileName());
+                juce::Component::SafePointer<FLSamplerAudioProcessorEditor> safeThis(this);
+                m.showMenuAsync(juce::PopupMenu::Options(), [safeThis, recentFiles](int res)
                 {
+                    if (safeThis == nullptr)
+                        return;
                     if (res >= 100)
                     {
                         int idx = res - 100;
-                        if (idx >= 0 && idx < audioProcessor.recentSampleFiles.size())
+                        if (idx >= 0 && idx < recentFiles.size())
                         {
-                            juce::File f(audioProcessor.recentSampleFiles[idx]);
+                            juce::File f(recentFiles[idx]);
                             if (f.existsAsFile())
                             {
-                                audioProcessor.loadSampleFromFile(f);
-                                wavScope.refreshIfNeeded();
-                                repaint();
+                                safeThis->audioProcessor.loadSampleFromFile(f);
+                                safeThis->wavScope.refreshIfNeeded();
+                                safeThis->repaint();
                             }
                         }
                     }
@@ -1892,7 +2756,8 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             if (lfoShapeRects[s].contains(pt))
             {
                 currentLfoShape = s;
-                audioProcessor.lfoShapeIdx.store(s, std::memory_order_relaxed);
+                if (currentInsTarget == 4)
+                    audioProcessor.lfoShapeIdx.store(s, std::memory_order_relaxed);
                 audioProcessor.targetLfos[(size_t)currentInsTarget].shape = s;
                 setHintText(s == 0 ? "LFO shape: Sine" : (s == 1 ? "LFO shape: Triangle" : "LFO shape: Pulse"));
                 repaint();
@@ -1900,22 +2765,34 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             }
         }
 
+        if (currentInsTarget != 0 && envPresetBtnRect.contains(pt))
+        {
+            showEnvelopePresetMenu();
+            return;
+        }
+
         // Interactive AHDSR Graph Node Dragging
         juce::Rectangle<int> envGraph(14, 106, 252, 86);
         if (currentInsTarget != 0 && envGraph.contains(pt))
         {
-            float d   = (float)envDelayKnob.getValue() * 35.0f;
-            float a   = (float)envAttackKnob.getValue() * 55.0f;
-            float h   = (float)envHoldKnob.getValue() * 40.0f;
-            float dec = (float)envDecayKnob.getValue() * 55.0f;
-            float rel = (float)envReleaseKnob.getValue() * 50.0f;
+            if (e.mods.isPopupMenu())
+            {
+                showEnvelopePresetMenu();
+                return;
+            }
 
-            float x0 = (float)envGraph.getX() + 4.0f;
+            float d   = (float)envDelayKnob.getValue() * 52.0f;
+            float a   = (float)envAttackKnob.getValue() * 88.0f;
+            float h   = (float)envHoldKnob.getValue() * 80.0f;
+            float dec = (float)envDecayKnob.getValue() * 68.0f;
+            float rel = (float)envReleaseKnob.getValue() * 72.0f;
+
+            float x0 = (float)envGraph.getX() + 3.0f;
             float x1 = x0 + d;
-            float x2 = x1 + juce::jmax(18.0f, a);
-            float x3 = x2 + juce::jmax(18.0f, h);
-            float x4 = x3 + juce::jmax(18.0f, dec);
-            float x5 = x4 + juce::jmax(18.0f, rel);
+            float x2 = x1 + a;
+            float x3 = x2 + h;
+            float x4 = x3 + dec;
+            float x5 = x4 + ((rel < 0.5f && dec < 0.5f && h > 2.0f) ? 24.0f : rel);
 
             float xs[5] = { x1, x2, x3, x4, x5 };
             float bestDist = 999.0f;
@@ -1930,6 +2807,8 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
                 draggingEnvNodeIdx = bestNode;
                 if (!volEnvOnBtn.getToggleState())
                     volEnvOnBtn.setToggleState(true, juce::sendNotificationSync);
+                if (currentInsTarget >= 2 && std::abs(envAmountKnob.getValue()) < 0.01)
+                    envAmountKnob.setValue(1.0, juce::sendNotificationSync);
                 return;
             }
         }
@@ -1955,7 +2834,7 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             if (arpDirIconRects[i].contains(pt))
             {
                 if (auto* param = audioProcessor.apvts.getParameter("arpDir"))
-                    param->setValueNotifyingHost(param->convertTo0to1((float)juce::jmin(4, i)));
+                    param->setValueNotifyingHost(param->convertTo0to1((float)i));
                 repaint();
                 return;
             }
@@ -1965,6 +2844,15 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
     // Shared Root Note, Key Region Bar & Piano Keyboard (Sheets 1 & 2)
     if (currentSheet == 1 || currentSheet == 2)
     {
+        if (keybHandBtnRect.contains(pt))
+        {
+            zoomedKeyboardMode = !zoomedKeyboardMode;
+            setHintText(zoomedKeyboardMode ? "Touch / Large keyboard view (B3..D6)"
+                                           : "Standard overview keyboard (C2..C8)");
+            repaint();
+            return;
+        }
+
         if (resetRootBtnRect.contains(pt))
         {
             if (auto* param = audioProcessor.apvts.getParameter("rootNote"))
@@ -1977,7 +2865,7 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
         }
 
         juce::Rectangle<int> scrollBar(bottomKeybRect.getX(), bottomKeybRect.getBottom(), bottomKeybRect.getWidth(), 12);
-        if (scrollBar.contains(pt))
+        if (!zoomedKeyboardMode && scrollBar.contains(pt))
         {
             float relX = juce::jlimit(0.0f, 1.0f, (float)(pt.x - scrollBar.getX()) / (float)scrollBar.getWidth());
             int midi = 24 + (int)std::round(relX * 72.0f);
@@ -1992,11 +2880,17 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             return;
         }
 
-        if (bottomKeybRect.contains(pt))
+        const juce::Rectangle<int> activeKeybBounds = zoomedKeyboardMode
+            ? bottomKeybRect.withHeight(bottomKeybRect.getHeight() + 12)
+            : bottomKeybRect;
+
+        if (activeKeybBounds.contains(pt))
         {
-            const int numWhiteKeys = 43;
-            const float relX = (float)(pt.x - bottomKeybRect.getX()) / (float)bottomKeybRect.getWidth();
-            const float relY = (float)(pt.y - bottomKeybRect.getY()) / (float)bottomKeybRect.getHeight();
+            const int startMidi    = zoomedKeyboardMode ? 47 : 24; // B3..D6 (17 white keys) vs C2..C8 (43 white keys)
+            const int endMidi      = zoomedKeyboardMode ? 74 : 96;
+            const int numWhiteKeys = zoomedKeyboardMode ? 17 : 43;
+            const float relX = (float)(pt.x - activeKeybBounds.getX()) / (float)activeKeybBounds.getWidth();
+            const float relY = (float)(pt.y - activeKeybBounds.getY()) / (float)activeKeybBounds.getHeight();
 
             auto isBlackKey = [](int m) {
                 int pc = m % 12;
@@ -2005,26 +2899,40 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
 
             int midi = 60;
             bool hitBlack = false;
-            // First check black keys if clicking in top 62% of keyboard
-            if (relY <= 0.62f)
+            const float blackKeyMaxRelY = zoomedKeyboardMode ? 0.48f : 0.65f;
+            if (relY <= blackKeyMaxRelY)
             {
-                const float whiteW = (float)bottomKeybRect.getWidth() / (float)numWhiteKeys;
-                const float kbX = (float)bottomKeybRect.getX();
-                int wIdx = 0;
-                for (int m = 24; m <= 96; ++m)
+                const float whiteW = (float)activeKeybBounds.getWidth() / (float)numWhiteKeys;
+                const float kbX = (float)activeKeybBounds.getX();
+                const float bw = whiteW * (zoomedKeyboardMode ? 0.68f : 0.70f);
+
+                if (zoomedKeyboardMode && pt.x <= (int)(kbX + bw * 0.45f))
                 {
-                    if (!isBlackKey(m))
+                    midi = 46; // Left partial A#3 black key
+                    hitBlack = true;
+                }
+                else if (zoomedKeyboardMode && pt.x >= (int)(kbX + numWhiteKeys * whiteW - bw * 0.45f))
+                {
+                    midi = 75; // Right partial D#6 black key
+                    hitBlack = true;
+                }
+                else
+                {
+                    int wIdx = 0;
+                    for (int m = startMidi; m <= endMidi; ++m)
                     {
-                        ++wIdx;
-                        continue;
-                    }
-                    float bx = kbX + ((float)wIdx - 0.35f) * whiteW;
-                    float bw = whiteW * 0.70f;
-                    if (pt.x >= (int)bx && pt.x <= (int)(bx + bw))
-                    {
-                        midi = m;
-                        hitBlack = true;
-                        break;
+                        if (!isBlackKey(m))
+                        {
+                            ++wIdx;
+                            continue;
+                        }
+                        float bx = kbX + ((float)wIdx - (zoomedKeyboardMode ? 0.34f : 0.35f)) * whiteW;
+                        if (pt.x >= (int)bx && pt.x <= (int)(bx + bw))
+                        {
+                            midi = m;
+                            hitBlack = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -2033,7 +2941,7 @@ void FLSamplerAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
             {
                 int wTarget = juce::jlimit(0, numWhiteKeys - 1, (int)(relX * numWhiteKeys));
                 int wCount = 0;
-                for (int m = 24; m <= 96; ++m)
+                for (int m = startMidi; m <= endMidi; ++m)
                 {
                     if (!isBlackKey(m))
                     {

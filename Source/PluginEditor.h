@@ -32,6 +32,9 @@ private:
     void updateActiveSheet(int sheetIdx);
     void updatePrecomputedSubTab(bool showLegacy);
     void updateInsTarget(int targetIdx);
+    void showEnvelopePresetMenu();
+    void applyEnvelopeValues(bool enabled, float del, float att, float hld, float dec, float sus, float rel,
+                             float amt, float attT, float decT, float relT, bool tempoSync = false);
     void openSampleFileChooser();
     void setupKnob(fls::FLSlider& s, const juce::String& hintName, double defaultVal,
                    bool bipolar = false, bool greenRing = false, bool orangeRing = false);
@@ -40,6 +43,11 @@ private:
 
     FLSamplerAudioProcessor& audioProcessor;
     fls::FLLookAndFeel flLookAndFeel;
+
+    // APVTS Attachments (declared before UI controls so C++ destroys attachments BEFORE their sliders/buttons/combos!)
+    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     // Resizable fixed-526x456 content canvas scaled proportionally on resize!
     juce::Component contentCanvas;
@@ -52,6 +60,7 @@ private:
     int currentInsTarget = 1; // 0=Panning, 1=Volume (default), 2=Mod X, 3=Mod Y, 4=Pitch
     int currentLfoShape  = 0; // 0=Sine, 1=Triangle, 2=Pulse
     bool trackingKeyMode = true; // false=Vol, true=Key
+    bool zoomedKeyboardMode = false; // false=Standard C2..C8 view (Image 2), true=Touch/Hand zoomed B3..D6 view (Image 1)
 
     // Top Header Bar Controls
     fls::FLLedCheckButton masterOnBtn { "", true };
@@ -63,8 +72,9 @@ private:
     juce::Rectangle<int> tabRectWave, tabRectEnv, tabRectFunc, skinToggleBtnRect;
     juce::Rectangle<int> fxSubTabWrench, fxSubTabBulb;
     juce::Rectangle<int> openFileBtnRect, locateFileBtnRect, removeFileBtnRect, fileNameBoxRect;
-    juce::Rectangle<int> bottomKeybRect, resetRootBtnRect, reverbSwitchRect;
+    juce::Rectangle<int> bottomKeybRect, resetRootBtnRect, keybHandBtnRect, reverbSwitchRect;
     juce::Rectangle<int> insTargetRects[5];
+    juce::Rectangle<int> envPresetBtnRect;
     juce::Rectangle<int> lfoShapeRects[3];
     juce::Rectangle<int> arpDirIconRects[6];
     juce::Rectangle<int> trackVolTabRect, trackKeyTabRect;
@@ -146,20 +156,16 @@ private:
     fls::FLLedCheckButton echoPingPongBtn   { "Ping pong" };
     fls::FLLedCheckButton echoFatModeBtn    { "Fat mode" };
 
-    // APVTS Attachments
-    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-
+    // Attachments are declared AFTER the controls they attach to, so C++ destroys the attachments FIRST!
     std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
     std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
     std::vector<std::unique_ptr<ComboAttachment>>  comboAttachments;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
-    juce::Image privateSkinBg;
     int previewHeldMidiNote = -1;
     int draggingEnvNodeIdx  = -1; // -1=none, 0=Delay, 1=Attack, 2=Hold, 3=Decay/Sustain, 4=Release
-    int draggingKeyRegionEdge = 0; // 0=none, 1=low, 2=high
+    int draggingKeyRegionEdge = -1; // -1=none, 0=low, 1=high
+    uint32_t lastSeenStateRev = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FLSamplerAudioProcessorEditor)
 };

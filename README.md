@@ -1,4 +1,6 @@
-# FL Sampler 2026 (VST3 & Standalone) — by PAPIELGUAPO
+# FL Sampler - PAPIELGUAPO
+
+![FL Sampler - PAPIELGUAPO](docs/screenshot.png)
 
 Clon 1:1 de ingeniería inversa del **Sampler de FL Studio 2026** en formato **VST3 & Standalone (JUCE 8 / C++17)** para usar en **Ableton Live, Reaper, FL Studio, Cubase, Logic** o cualquier DAW.
 
@@ -8,7 +10,7 @@ Desarrollado por **PAPIELGUAPO** (`COMPANY_NAME: "PAPIELGUAPO"`, `ManufacturerCo
 3. **`PRIVATE`** — Tema exclusivo GrowthTune (`#121316` + anillos radiales neón rosa `#ec4899`, violeta `#a855f7` y cian `#06b6d4`).
 4. **`SKIN: BLACK`** — Tema Stealth Puro Negro (`#050506` + paneles `#0b0b0e` + visor `#020203` + arcos monocromáticos blanco/platino).
 
-![FL Sampler 4 Skins Showcase](docs/screenshot.png)
+![FL Sampler - PAPIELGUAPO Private Skin](docs/skin_private.png)
 
 ---
 

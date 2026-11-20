@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
+#include "SamplerEngine.h"
 #include <cmath>
 #include <algorithm>
 #include <vector>
@@ -37,6 +38,7 @@ struct PrecomputedSettings
     bool  reverbB     = false;
     float stereoDelay = 0.0f; // -1..+1
     float pogo        = 0.0f; // -1..+1
+    int   resamplingQuality = 3; // 0=2-pt linear .. 8=512-pt sinc
 
     bool operator==(const PrecomputedSettings& o) const noexcept
     {
@@ -62,7 +64,8 @@ struct PrecomputedSettings
             && std::abs(reverb - o.reverb) < 1e-4f
             && reverbB == o.reverbB
             && std::abs(stereoDelay - o.stereoDelay) < 1e-4f
-            && std::abs(pogo - o.pogo) < 1e-4f;
+            && std::abs(pogo - o.pogo) < 1e-4f
+            && resamplingQuality == o.resamplingQuality;
     }
 };
 
@@ -92,18 +95,37 @@ public:
         int remSamples = srcSamples - startIdx;
         int lenSamples = juce::jlimit(1, remSamples, (int)std::round(juce::jmax(0.002f, s.length) * remSamples));
 
-        // 2. Apply TRIM (trim trailing/leading silence below threshold)
+        // 2. Apply TRIM (1:1 FL Studio Sampler: trims trailing silence/low-level tail from the end of the sample)
         if (s.trim > 0.001f)
         {
-            const float thresh = std::pow(s.trim, 2.5f) * 0.25f;
-            int endIdx = startIdx + lenSamples - 1;
-            while (endIdx > startIdx + 16)
+            // Smooth logarithmic threshold from -96 dB (0.000015f) up to -12 dB (0.25f) relative to sample peak,
+            // using a short sliding peak window so single zero-crossings don't stop the trim prematurely.
+            float maxPeak = 0.001f;
+            for (int ch = 0; ch < srcChannels; ++ch)
             {
-                float a0 = std::abs(source.getSample(0, endIdx));
-                float a1 = srcChannels > 1 ? std::abs(source.getSample(1, endIdx)) : a0;
-                if (juce::jmax(a0, a1) > thresh)
+                auto range = juce::FloatVectorOperations::findMinAndMax(source.getReadPointer(ch) + startIdx, lenSamples);
+                maxPeak = juce::jmax(maxPeak, std::abs(range.getStart()), std::abs(range.getEnd()));
+            }
+
+            const float dB = -90.0f + std::pow(s.trim, 0.55f) * 76.0f; // -90 dB .. -14 dB
+            const float thresh = maxPeak * std::pow(10.0f, dB / 20.0f);
+            const int winSamples = juce::jlimit(8, 256, (int)std::round((sampleRate > 0.0 ? sampleRate : 44100.0) * 0.0025));
+
+            int endIdx = startIdx + lenSamples - 1;
+            const int minEndIdx = startIdx + juce::jmin(64, lenSamples - 1);
+            while (endIdx > minEndIdx)
+            {
+                float localMax = 0.0f;
+                const int w0 = juce::jmax(startIdx, endIdx - winSamples + 1);
+                for (int k = w0; k <= endIdx; ++k)
+                {
+                    float a0 = std::abs(source.getSample(0, k));
+                    float a1 = srcChannels > 1 ? std::abs(source.getSample(1, k)) : a0;
+                    localMax = juce::jmax(localMax, juce::jmax(a0, a1));
+                }
+                if (localMax > thresh)
                     break;
-                --endIdx;
+                endIdx -= juce::jmax(1, winSamples / 4);
             }
             lenSamples = juce::jmax(16, endIdx - startIdx + 1);
         }
@@ -168,7 +190,7 @@ public:
             }
         }
 
-        // 8. Legacy POGO (non-linear time-warp pitch bend envelope across sample)
+        // 8. Legacy POGO (non-linear time-warp pitch bend envelope across sample, using selected FL Resampling Quality!)
         if (std::abs(s.pogo) > 0.005f && lenSamples > 32)
         {
             juce::AudioBuffer<float> temp(numCh, lenSamples);
@@ -178,14 +200,14 @@ public:
             {
                 const float* srcP = temp.getReadPointer(ch);
                 float* dstP = dest.getWritePointer(ch);
+                double prevWarped = 0.0;
                 for (int i = 0; i < lenSamples; ++i)
                 {
                     double norm = (double)i / (double)(lenSamples - 1);
                     double warped = std::pow(norm, exponent) * (double)(lenSamples - 1);
-                    int idx0 = juce::jlimit(0, lenSamples - 1, (int)warped);
-                    int idx1 = juce::jmin(lenSamples - 1, idx0 + 1);
-                    float frac = (float)(warped - idx0);
-                    dstP[i] = srcP[idx0] + frac * (srcP[idx1] - srcP[idx0]);
+                    double localStep = (i > 0) ? std::abs(warped - prevWarped) : 1.0;
+                    prevWarped = warped;
+                    dstP[i] = SamplerEngine::readResampledFL(srcP, lenSamples, warped, localStep, s.resamplingQuality);
                 }
             }
         }
@@ -209,7 +231,7 @@ public:
             }
         }
 
-        // 10. Legacy Precomputed Filter (CUT / RES) & EQ
+        // 10. Legacy Precomputed Filter (CUT / RES) & EQ (1:1 FL Studio Legacy Precomputed Filter)
         if (std::abs(s.eq) > 0.005f && sampleRate > 0.0)
         {
             const float tilt = s.eq * 0.45f;
@@ -227,85 +249,230 @@ public:
         }
         if (s.cut < 0.995f || s.res > 0.005f)
         {
-            const float cutoffHz = 40.0f * std::pow(450.0f, s.cut);
-            const float q = 0.707f + s.res * 8.0f;
-            const float w0 = juce::MathConstants<float>::twoPi * juce::jmin(cutoffHz, (float)sampleRate * 0.48f) / (float)sampleRate;
-            const float alpha = std::sin(w0) / (2.0f * q);
-            const float cosw0 = std::cos(w0);
-            const float b0 = (1.0f - cosw0) * 0.5f;
-            const float b1 = 1.0f - cosw0;
-            const float b2 = (1.0f - cosw0) * 0.5f;
-            const float a0 = 1.0f + alpha;
-            const float a1 = -2.0f * cosw0;
-            const float a2 = 1.0f - alpha;
+            // 1:1 FL Studio Legacy Precomputed CUT / RES Filter:
+            // - Uses a 64-bit double-precision 2x-oversampled Zero-Delay Feedback (ZDF / TPT) Resonant Low-Pass SVF.
+            // - High-Q resonant ringing naturally decays beyond the end of short one-shots, so when RES > 0.35 we add a
+            //   short resonance decay tail (up to ~45ms) so the whistle/ringing peak never truncates with a click.
+            // - Even when CUT is at 100% (1.0), turning RES > 0 engages the upper-spectrum resonant peak (~8.5 kHz)
+            //   with FL Studio's characteristic metallic/acid bite, while sweeping CUT down produces a steep, singing
+            //   resonant peak (Q up to ~32) that stays normalized within clear headroom.
+            const double effSr = (sampleRate > 1000.0 ? sampleRate : 44100.0);
+            const double osSr  = effSr * 2.0; // 2x oversampling for zero-aliasing high-Q resonance near Nyquist
+
+            const double cutNorm = juce::jlimit(0.0, 1.0, (double)s.cut);
+            const double resNorm = juce::jlimit(0.0, 1.0, (double)s.res);
+
+            if (resNorm > 0.35 && s.length >= 0.995f)
+            {
+                const int resTailSamples = (int)std::round((resNorm - 0.35) * 0.065 * effSr);
+                if (resTailSamples > 0)
+                {
+                    const int prevLen = lenSamples;
+                    lenSamples += resTailSamples;
+                    dest.setSize(numCh, lenSamples, true, true, true);
+                    for (int ch = 0; ch < numCh; ++ch)
+                        juce::FloatVectorOperations::clear(dest.getWritePointer(ch) + prevLen, resTailSamples);
+                }
+            }
+
+            // When CUT = 1.0 and RES > 0, FL Studio places the resonant pole around ~8.5 kHz so RES is clearly audible at default CUT;
+            // as CUT sweeps 0..1, frequency sweeps exponentially from 45 Hz up to 16.5 kHz (or 8.5 kHz weighted by RES at the top end).
+            const double topFreqHz = 16500.0 - 8000.0 * std::pow(resNorm, 0.50);
+            const double cutoffHz  = juce::jlimit(38.0, effSr * 0.46, 45.0 * std::pow(topFreqHz / 45.0, std::pow(cutNorm, 0.90)));
+
+            // Non-linear FL resonance curve: Q spans from Butterworth (0.707) up to high-resonance self-oscillation edge (Q ~ 30)
+            const double q = 0.70710678 + 29.5 * std::pow(resNorm, 2.05);
+            const double k = 1.0 / q; // SVF damping factor (2*zeta = 1/Q)
+
+            const double g  = std::tan(juce::MathConstants<double>::pi * cutoffHz / osSr);
+            const double a1 = 1.0 / (1.0 + g * (g + k));
+            const double a2 = g * a1;
+            const double a3 = g * a2;
+
+            // FL Studio Precomputed Filter blends extra bandpass resonant peak + compensates passband/peak gain at high Q
+            const double resPeakBoost = 0.48 * std::pow(resNorm, 1.15);
+            const double passbandComp = 1.0 / std::sqrt(1.0 + 0.22 * resNorm * q);
 
             for (int ch = 0; ch < numCh; ++ch)
             {
                 float* d = dest.getWritePointer(ch);
-                float x1 = 0.0f, x2 = 0.0f, y1 = 0.0f, y2 = 0.0f;
+                double ic1eq = 0.0;
+                double ic2eq = 0.0;
+                double prevIn = (lenSamples > 0) ? (double)d[0] : 0.0;
+
+                auto stepZdfSvf = [&](double inSample) noexcept -> double
+                {
+                    // Soft non-linear saturation inside the resonant feedback loop (prevents harsh digital overflow at high Q)
+                    const double fb = ic1eq / (1.0 + 0.09 * resNorm * std::abs(ic1eq));
+                    const double v3 = inSample - ic2eq;
+                    const double v1 = a1 * fb + a2 * v3;
+                    const double v2 = ic2eq + a2 * fb + a3 * v3;
+                    ic1eq = 2.0 * v1 - fb;
+                    ic2eq = 2.0 * v2 - ic2eq;
+                    // Low-pass output + accentuated resonant peak at cutoff
+                    return (v2 + v1 * resPeakBoost) * passbandComp;
+                };
+
                 for (int i = 0; i < lenSamples; ++i)
                 {
-                    const float x0 = d[i];
-                    const float y0 = (b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
-                    x2 = x1; x1 = x0;
-                    y2 = y1; y1 = y0;
-                    d[i] = y0;
+                    const double curIn = (double)d[i];
+                    const double midIn = 0.5 * (prevIn + curIn);
+                    prevIn = curIn;
+
+                    const double yMid = stepZdfSvf(midIn);
+                    const double yCur = stepZdfSvf(curIn);
+                    double out = 0.5 * (yMid + yCur);
+                    if (!std::isfinite(out))
+                    {
+                        ic1eq = 0.0;
+                        ic2eq = 0.0;
+                        out = 0.0;
+                    }
+                    d[i] = (float)out;
                 }
             }
         }
 
-        // 11. Legacy BOOST + CLIP (with 2x Polyphase Half-Band Oversampling for zero-aliasing saturation)
+        // 11. Legacy BOOST + CLIP (1:1 FL Studio Sampler: BOOST only clips at 0 dBFS when CLIP is enabled;
+        // when CLIP is OFF, BOOST increases the linear sample amplitude cleanly without clipping/saturation!)
         if (s.boost > 0.002f)
         {
-            const float gain = 1.0f + s.boost * 15.0f;
-            auto shapeSample = [clip = s.clip](float x) noexcept -> float
+            const float gain = 1.0f + s.boost * 7.0f;
+            if (s.clip)
             {
-                return clip ? juce::jlimit(-1.0f, 1.0f, x) : std::tanh(x);
-            };
-            for (int ch = 0; ch < numCh; ++ch)
-            {
-                float* d = dest.getWritePointer(ch);
-                float prevIn = 0.0f;
-                float prevShapedMid = 0.0f;
-                for (int i = 0; i < lenSamples; ++i)
+                for (int ch = 0; ch < numCh; ++ch)
                 {
-                    const float curIn = d[i] * gain;
-                    const float midIn = 0.5f * (prevIn + curIn);
-                    const float yMid  = shapeSample(midIn);
-                    const float yCur  = shapeSample(curIn);
-                    // Half-band 2x downsample filter [0.25, 0.5, 0.25]
-                    d[i] = 0.25f * prevShapedMid + 0.5f * yCur + 0.25f * yMid;
-                    prevIn = curIn;
-                    prevShapedMid = yMid;
+                    float* d = dest.getWritePointer(ch);
+                    for (int i = 0; i < lenSamples; ++i)
+                        d[i] = juce::jlimit(-1.0f, 1.0f, d[i] * gain);
                 }
+            }
+            else
+            {
+                dest.applyGain(gain);
             }
         }
 
-        // 12. Legacy REVERB (A/B room/hall precomputed convolution-style Schroeder reverb)
-        if (s.reverb > 0.004f && sampleRate > 0.0)
+        // 12. Legacy REVERB (1:1 FL Studio Precomputed Reverb A & B):
+        // - Mode A ("Reverb A"): Bright, dense Room/Plate Freeverb-style tank (8 parallel low-damped combs + 4 series allpass diffusers),
+        //   adds metallic/ambient thickness and room body primarily over the existing sample length.
+        // - Mode B ("Reverb B"): Smooth, warm Hall/Canyon tank with high-frequency damping, wide stereo decorrelation,
+        //   and automatic sample buffer tail extension so one-shots decay naturally to silence without being cut off!
+        if (s.reverb > 0.002f && sampleRate > 0.0)
         {
-            const float wet = s.reverb * 0.65f;
-            const int d1 = (int)((s.reverbB ? 0.043 : 0.023) * sampleRate);
-            const int d2 = (int)((s.reverbB ? 0.059 : 0.031) * sampleRate);
-            const float fb = s.reverbB ? 0.72f : 0.55f;
-            std::vector<float> comb1((size_t)juce::jmax(1, d1), 0.0f);
-            std::vector<float> comb2((size_t)juce::jmax(1, d2), 0.0f);
+            const double srScale = sampleRate / 44100.0;
+            const float revAmt = s.reverb;
+
+            // Mode B extends the sample buffer with a natural decay tail; Mode A only adds a short room release tail
+            const double tailSec = s.reverbB
+                ? (0.25 + std::pow((double)revAmt, 1.35) * 1.85)
+                : (0.04 + std::pow((double)revAmt, 1.50) * 0.28);
+            const int extraTailSamples = (s.length >= 0.995f) ? (int)std::round(tailSec * sampleRate) : 0;
+            const int origSamples = lenSamples;
+            if (extraTailSamples > 0)
+            {
+                lenSamples += extraTailSamples;
+                dest.setSize(numCh, lenSamples, true, true, true);
+                for (int ch = 0; ch < numCh; ++ch)
+                    juce::FloatVectorOperations::clear(dest.getWritePointer(ch) + origSamples, extraTailSamples);
+            }
+
+            // Reference 44.1kHz Freeverb/Jeckorro prime tunings for Mode A (tight room/plate) vs Mode B (spacious hall)
+            static constexpr int kCombTuningsA[8] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
+            static constexpr int kCombTuningsB[8] = { 1557, 1617, 1789, 1913, 2053, 2179, 2311, 2441 };
+            static constexpr int kAllpassTuningsA[4] = { 556, 441, 341, 225 };
+            static constexpr int kAllpassTuningsB[4] = { 773, 601, 461, 313 };
+            static constexpr int kStereoSpread = 23;
+
+            const float roomFeedback = s.reverbB
+                ? (0.78f + std::pow(revAmt, 0.65f) * 0.145f)  // Mode B: long, lush Hall decay (0.78 .. 0.925)
+                : (0.64f + std::pow(revAmt, 0.75f) * 0.215f); // Mode A: tight, dense Room/Plate (0.64 .. 0.855)
+
+            const float damp = s.reverbB ? 0.36f : 0.12f; // Mode B: warm HF roll-off; Mode A: bright, crisp reflections
+            const float dampInv = 1.0f - damp;
+            const float allpassFb = s.reverbB ? 0.55f : 0.50f;
+            const float wetGain = s.reverbB
+                ? (std::pow(revAmt, 0.85f) * 0.52f)
+                : (std::pow(revAmt, 0.80f) * 0.62f);
+
+            // Pre-delay (Mode B has a 14ms hall pre-delay; Mode A is immediate 2.5ms room slap)
+            const int preDelayLen = juce::jmax(1, (int)std::round((s.reverbB ? 0.014 : 0.0025) * sampleRate));
+
             for (int ch = 0; ch < numCh; ++ch)
             {
-                std::fill(comb1.begin(), comb1.end(), 0.0f);
-                std::fill(comb2.begin(), comb2.end(), 0.0f);
+                const int spread = (ch == 1) ? kStereoSpread : 0;
+                std::vector<float> preDelayBuf((size_t)preDelayLen, 0.0f);
+                int preDelayPos = 0;
+
+                std::vector<float> combBufs[8];
+                int combPos[8] = {};
+                float combFilterStore[8] = {};
+                for (int c = 0; c < 8; ++c)
+                {
+                    const int baseTuning = s.reverbB ? kCombTuningsB[c] : kCombTuningsA[c];
+                    const int dLen = juce::jmax(16, (int)std::round((baseTuning + spread) * srScale));
+                    combBufs[c].assign((size_t)dLen, 0.0f);
+                }
+
+                std::vector<float> apBufs[4];
+                int apPos[4] = {};
+                for (int a = 0; a < 4; ++a)
+                {
+                    const int baseAp = s.reverbB ? kAllpassTuningsB[a] : kAllpassTuningsA[a];
+                    const int aLen = juce::jmax(8, (int)std::round((baseAp + spread) * srScale));
+                    apBufs[a].assign((size_t)aLen, 0.0f);
+                }
+
                 float* d = dest.getWritePointer(ch);
-                int p1 = 0, p2 = 0;
+                float dcBlockX1 = 0.0f, dcBlockY1 = 0.0f;
+
                 for (int i = 0; i < lenSamples; ++i)
                 {
-                    float x = d[i];
-                    float y1 = comb1[(size_t)p1];
-                    float y2 = comb2[(size_t)p2];
-                    comb1[(size_t)p1] = x + y1 * fb;
-                    comb2[(size_t)p2] = x + (y2 * fb * ((ch == 1) ? -1.0f : 1.0f));
-                    p1 = (p1 + 1) % (int)comb1.size();
-                    p2 = (p2 + 1) % (int)comb2.size();
-                    d[i] = x + 0.5f * (y1 + y2) * wet;
+                    const float dry = d[i];
+                    const float delayedIn = preDelayBuf[(size_t)preDelayPos];
+                    preDelayBuf[(size_t)preDelayPos] = dry * 0.032f;
+                    preDelayPos = (preDelayPos + 1) % preDelayLen;
+
+                    // 8 parallel lowpass-feedback comb filters
+                    float acc = 0.0f;
+                    for (int c = 0; c < 8; ++c)
+                    {
+                        auto& cb = combBufs[c];
+                        const int pos = combPos[c];
+                        const float out = cb[(size_t)pos];
+                        combFilterStore[c] = (out * dampInv) + (combFilterStore[c] * damp);
+                        cb[(size_t)pos] = delayedIn + (combFilterStore[c] * roomFeedback);
+                        combPos[c] = (pos + 1) % (int)cb.size();
+                        acc += out;
+                    }
+
+                    // 4 series Schroeder allpass diffusers
+                    for (int a = 0; a < 4; ++a)
+                    {
+                        auto& ab = apBufs[a];
+                        const int pos = apPos[a];
+                        const float bufOut = ab[(size_t)pos];
+                        const float inVal = acc;
+                        acc = -inVal + bufOut;
+                        ab[(size_t)pos] = inVal + (bufOut * allpassFb);
+                        apPos[a] = (pos + 1) % (int)ab.size();
+                    }
+
+                    // Subtle high-pass DC blocker on wet signal so low 808s/kicks stay tight
+                    const float wet = acc - dcBlockX1 + 0.992f * dcBlockY1;
+                    dcBlockX1 = acc;
+                    dcBlockY1 = wet;
+
+                    // Smooth tail fade-out on the last 15% of extended tail
+                    float tailEnv = 1.0f;
+                    if (extraTailSamples > 0 && i >= origSamples)
+                    {
+                        const float t = (float)(i - origSamples) / (float)extraTailSamples;
+                        if (t > 0.80f)
+                            tailEnv = juce::jlimit(0.0f, 1.0f, (1.0f - t) / 0.20f);
+                    }
+
+                    d[i] = dry + wet * wetGain * tailEnv;
                 }
             }
         }
@@ -351,25 +518,51 @@ public:
             }
         }
 
-        // 14. Loop Crossfade
-        if (s.crossfade > 0.002f && lenSamples > 64)
+        // 14. Loop Crossfade (1:1 FL Studio Sampler: turning CROSSFADE > 0 blends the pre-loop region into the active loop region
+        // and shortens the processed buffer while advancing the effective Loop Start from 50% up to 80% as CROSSFADE increases!)
+        if (s.crossfade > 0.001f && lenSamples > 64)
         {
-            const int xfadeLen = juce::jlimit(8, lenSamples / 2, (int)std::round(s.crossfade * 0.45f * lenSamples));
-            const int loopEnd = juce::jlimit(xfadeLen, lenSamples - 1, (int)std::round(outLoopEndNorm * (lenSamples - 1)));
-            const int loopStart = juce::jlimit(0, loopEnd - xfadeLen, (int)std::round(outLoopStartNorm * (lenSamples - 1)));
+            const float xf = juce::jlimit(0.0f, 1.0f, s.crossfade);
+            // In FL Studio Sampler:
+            // - As CROSSFADE turns from >0% to 100%, the crossfade blend length is 0 .. 45% of the sample,
+            //   truncating the pre-loop portion and placing the red "Loop" start marker from 50% (at max crossfade)
+            //   towards the left (~21% at low crossfade) while Loop End stays at 100%.
+            const int xfadeLen = juce::jlimit(8, (int)(lenSamples * 0.48f),
+                                              (int)std::round((0.04f + 0.44f * xf) * (float)lenSamples));
+            const int newLen = juce::jmax(32, lenSamples - xfadeLen);
+            const int loopLen = juce::jlimit(16, newLen - 4,
+                                             (int)std::round((0.80f - 0.30f * xf) * (float)newLen));
+            const int loopStartIdx = juce::jmax(0, newLen - loopLen);
+
+            juce::AudioBuffer<float> xfBuf(numCh, newLen);
             for (int ch = 0; ch < numCh; ++ch)
             {
-                float* d = dest.getWritePointer(ch);
-                for (int i = 0; i < xfadeLen; ++i)
+                const float* srcP = dest.getReadPointer(ch);
+                float* dstP = xfBuf.getWritePointer(ch);
+
+                // Copy everything up to the end of the new shortened buffer
+                for (int i = 0; i < newLen; ++i)
+                    dstP[i] = srcP[i];
+
+                // Crossfade the tail of the loop [newLen - xfadeLen .. newLen - 1] with the pre-loop/overflow audio
+                const int actualXf = juce::jmin(xfadeLen, loopLen);
+                for (int i = 0; i < actualXf; ++i)
                 {
-                    const float t = (float)i / (float)xfadeLen;
-                    const float a = std::sin(t * juce::MathConstants<float>::halfPi);
-                    const float b = std::cos(t * juce::MathConstants<float>::halfPi);
-                    int idxEnd = loopEnd - xfadeLen + i;
-                    int idxStart = juce::jmin(lenSamples - 1, loopStart + i);
-                    d[idxEnd] = d[idxEnd] * b + d[idxStart] * a;
+                    const float t = (float)i / (float)juce::jmax(1, actualXf - 1);
+                    const float gainTail = std::cos(t * juce::MathConstants<float>::halfPi);
+                    const float gainHead = std::sin(t * juce::MathConstants<float>::halfPi);
+
+                    const int tailIdx = newLen - actualXf + i;
+                    const int headIdx = juce::jlimit(0, lenSamples - 1, loopStartIdx + i);
+                    const int preLoopIdx = juce::jlimit(0, lenSamples - 1, juce::jmax(0, loopStartIdx - actualXf + i));
+                    dstP[tailIdx] = srcP[tailIdx] * gainTail + (0.65f * srcP[headIdx] + 0.35f * srcP[preLoopIdx]) * gainHead;
                 }
             }
+
+            dest.makeCopyOf(xfBuf);
+            lenSamples = newLen;
+            outLoopStartNorm = (double)loopStartIdx / (double)juce::jmax(1, newLen - 1);
+            outLoopEndNorm   = 1.0;
         }
 
         // 15. Normalize (peak normalization to 0 dBFS, just like FL Sampler)

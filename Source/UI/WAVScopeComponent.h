@@ -52,19 +52,11 @@ public:
     void paint(juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
-        const float cornerR = FLColors::isAbletonSkin ? 0.0f : (FLColors::isPrivateSkin ? 4.0f : 2.0f);
+        const float cornerR = FLColors::isAbletonSkin ? 0.0f : 2.0f;
 
         // Dark charcoal / obsidian waveform background
         g.setColour(FLColors::waveBg());
         g.fillRoundedRectangle(b, cornerR);
-
-        if (FLColors::isPrivateSkin)
-        {
-            juce::ColourGradient glow(juce::Colour(0xffa855f7).withAlpha(0.11f), b.getCentreX(), b.getY(),
-                                      juce::Colours::transparentBlack, b.getCentreX(), b.getBottom(), false);
-            g.setGradientFill(glow);
-            g.fillRoundedRectangle(b, cornerR);
-        }
 
         // Outer border (highlighted when dragging a sample file over the scope)
         g.setColour(isDragHover ? FLColors::greenNeon() : FLColors::panelBorder());
@@ -154,8 +146,8 @@ public:
                 }
                 fillP.closeSubPath();
                 juce::Colour c = (ch == 0)
-                    ? (FLColors::isPrivateSkin ? juce::Colour(0xffec4899) : (FLColors::isAbletonSkin ? juce::Colour(0xff00d2ff) : juce::Colour(0xff9aa5b1)))
-                    : (FLColors::isPrivateSkin ? juce::Colour(0xff06b6d4) : (FLColors::isAbletonSkin ? juce::Colour(0xffffb000) : juce::Colour(0xff7fb2cc)));
+                    ? (FLColors::isAbletonSkin ? juce::Colour(0xff00d2ff) : juce::Colour(0xff9aa5b1))
+                    : (FLColors::isAbletonSkin ? juce::Colour(0xffffb000) : juce::Colour(0xff7fb2cc));
                 g.setColour(c.withAlpha(0.45f));
                 g.fillPath(fillP);
             }
@@ -205,14 +197,38 @@ public:
             }
             waveFillPath.closeSubPath();
 
-            g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xffa855f7).withAlpha(0.34f)
-                        : (FLColors::isAbletonSkin ? juce::Colour(0xff00d2ff).withAlpha(0.32f)
-                                                   : juce::Colour(0xff9aa5b1).withAlpha(0.42f)));
+            const juce::Colour waveFillCol =
+                FLColors::isWinampSkin   ? juce::Colour(0xff00ff00).withAlpha(0.35f)
+              : FLColors::isWin98Skin    ? juce::Colour(0xff00ff40).withAlpha(0.32f)
+              : FLColors::isMacOSXSkin   ? juce::Colour(0xff0066ee).withAlpha(0.30f)
+              : FLColors::isProToolsSkin ? juce::Colour(0xff00d2ff).withAlpha(0.34f)
+              : FLColors::isSequoiaSkin  ? juce::Colour(0xffffa019).withAlpha(0.33f)
+              : FLColors::isAuditionSkin ? juce::Colour(0xff00f5b8).withAlpha(0.36f)
+              : FLColors::isLogicSkin    ? juce::Colour(0xff26d6ff).withAlpha(0.34f)
+              : FLColors::isCubaseSkin   ? juce::Colour(0xff00b7ff).withAlpha(0.34f)
+              : FLColors::isReaperSkin   ? juce::Colour(0xff35d0a3).withAlpha(0.34f)
+              : FLColors::isAbletonSkin  ? juce::Colour(0xff00d2ff).withAlpha(0.32f)
+              : FLColors::isWhiteSkin    ? juce::Colour(0xff10b981).withAlpha(0.28f)
+                                         : juce::Colour(0xff9aa5b1).withAlpha(0.42f);
+
+            const juce::Colour waveStrokeCol =
+                FLColors::isWinampSkin   ? juce::Colour(0xff00ff00).withAlpha(0.96f)
+              : FLColors::isWin98Skin    ? juce::Colour(0xff00ff40).withAlpha(0.95f)
+              : FLColors::isMacOSXSkin   ? juce::Colour(0xff0055d4).withAlpha(0.90f)
+              : FLColors::isProToolsSkin ? juce::Colour(0xff52ff52).withAlpha(0.90f)
+              : FLColors::isSequoiaSkin  ? juce::Colour(0xffffc14d).withAlpha(0.93f)
+              : FLColors::isAuditionSkin ? juce::Colour(0xff2effc8).withAlpha(0.95f)
+              : FLColors::isLogicSkin    ? juce::Colour(0xff5ee2ff).withAlpha(0.92f)
+              : FLColors::isCubaseSkin   ? juce::Colour(0xff42ccff).withAlpha(0.92f)
+              : FLColors::isReaperSkin   ? juce::Colour(0xff5ef2c8).withAlpha(0.92f)
+              : FLColors::isAbletonSkin  ? juce::Colour(0xff42e3ff).withAlpha(0.92f)
+              : FLColors::isWhiteSkin    ? juce::Colour(0xff059669).withAlpha(0.90f)
+                                         : juce::Colour(0xffcfd7e0).withAlpha(0.85f);
+
+            g.setColour(waveFillCol);
             g.fillPath(waveFillPath);
 
-            g.setColour(FLColors::isPrivateSkin ? juce::Colour(0xffec4899).withAlpha(0.92f)
-                        : (FLColors::isAbletonSkin ? juce::Colour(0xff42e3ff).withAlpha(0.92f)
-                                                   : juce::Colour(0xffcfd7e0).withAlpha(0.85f)));
+            g.setColour(waveStrokeCol);
             g.strokePath(waveStrokePath, juce::PathStrokeType(1.05f));
         }
 
@@ -273,59 +289,49 @@ public:
             }
         }
 
-        // Draw FL Studio 1:1 Loop Start / Loop End crimson markers + shaded region + top inward flags + Crossfade cone
-        const bool useLoop  = processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f;
+        // Draw FL Studio 1:1 Loop Start / Loop End crimson markers + shaded region + bottom "Loop" flag (Images 1 & 2)
+        const float xfadeVal = processor.apvts.getRawParameterValue("crossfade")->load();
+        const float xfLoopStart = processor.computedCrossfadeLoopStart.load(std::memory_order_relaxed);
+        const bool hasXfadeLoop = (xfadeVal > 0.001f && xfLoopStart >= 0.0f);
+        const bool useLoop = (processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f) || hasXfadeLoop;
         const bool pingPong = processor.apvts.getRawParameterValue("pingPongLoop")->load() > 0.5f;
-        if (useLoop)
-        {
-            const float lStart = processor.apvts.getRawParameterValue("loopStart")->load();
-            const float lEnd   = processor.apvts.getRawParameterValue("loopEnd")->load();
-            const float xfade  = processor.apvts.getRawParameterValue("crossfade")->load();
 
+        const float lStart = hasXfadeLoop ? xfLoopStart : processor.apvts.getRawParameterValue("loopStart")->load();
+        const float lEnd   = hasXfadeLoop ? 1.0f        : processor.apvts.getRawParameterValue("loopEnd")->load();
+        const bool showLoopRegion = useLoop && (hasXfadeLoop || lStart > 0.0005f || lEnd < 0.9995f);
+
+        if (showLoopRegion)
+        {
             float lx1 = juce::jlimit(2.0f, w - 2.0f, normToPixelX(lStart));
             float lx2 = juce::jlimit(2.0f, w - 2.0f, normToPixelX(lEnd));
             if (lx2 < lx1 + 2.0f) lx2 = lx1 + 2.0f;
 
-            g.setColour(juce::Colour(0xffff3b3b).withAlpha(0.16f));
-            g.fillRect(lx1, 2.0f, lx2 - lx1, h - 4.0f);
+            // Dark crimson/maroon tint over the active loop region (1:1 Images 1 & 2)
+            g.setColour(juce::Colour(0xff7a1c24).withAlpha(0.24f));
+            g.fillRect(lx1, 1.0f, lx2 - lx1, h - 2.0f);
 
-            if (xfade > 0.002f)
-            {
-                float xfW = xfade * 0.45f * (lx2 - lx1);
-                juce::Path xfPath;
-                xfPath.startNewSubPath(lx2 - xfW, h - 2.0f);
-                xfPath.lineTo(lx2, 2.0f);
-                xfPath.lineTo(lx2, h - 2.0f);
-                xfPath.closeSubPath();
-                g.setColour(juce::Colour(0xffff9e2c).withAlpha(0.22f));
-                g.fillPath(xfPath);
-                g.setColour(juce::Colour(0xffff9e2c).withAlpha(0.75f));
-                g.drawLine(lx2 - xfW, h - 2.0f, lx2, 2.0f, 1.3f);
-            }
-
-            const juce::Colour loopCol(0xffff4a4a);
+            // Vertical crimson loop boundary lines at Loop Start and Loop End
+            const juce::Colour loopCol(0xffc93b42);
             g.setColour(loopCol);
-            g.drawLine(lx1, 2.0f, lx1, h - 2.0f, 1.5f);
-            g.drawLine(lx2, 2.0f, lx2, h - 2.0f, 1.5f);
+            g.drawLine(lx1, 1.0f, lx1, h - 1.0f, 1.3f);
+            g.drawLine(lx2, 1.0f, lx2, h - 1.0f, 1.3f);
 
-            juce::Path startFlag, endFlag;
-            startFlag.addTriangle(lx1, 2.0f, lx1 + 9.0f, 2.0f, lx1, 11.0f);
-            endFlag.addTriangle(lx2, 2.0f, lx2 - 9.0f, 2.0f, lx2, 11.0f);
-            g.fillPath(startFlag);
-            g.fillPath(endFlag);
+            // Bottom-left solid crimson marker tab + "Loop" text label (1:1 FL Studio Images 1 & 2)
+            juce::Path botTab;
+            botTab.startNewSubPath(lx1, h - 16.0f);
+            botTab.lineTo(lx1 + 4.5f, h - 12.0f);
+            botTab.lineTo(lx1 + 4.5f, h - 1.0f);
+            botTab.lineTo(lx1, h - 1.0f);
+            botTab.closeSubPath();
+            g.fillPath(botTab);
 
-            g.drawLine(lx1, h - 2.0f, lx1 + 6.0f, h - 2.0f, 2.0f);
-            g.drawLine(lx2 - 6.0f, h - 2.0f, lx2, h - 2.0f, 2.0f);
-
-            if (lx2 - lx1 > 44.0f)
+            if (lx2 - lx1 > 34.0f)
             {
-                g.setColour(juce::Colour(0xff1e2228).withAlpha(0.75f));
-                g.fillRoundedRectangle(lx1 + 10.0f, 4.0f, pingPong ? 56.0f : 34.0f, 13.0f, 2.5f);
-                g.setColour(juce::Colour(0xffff8a8a));
-                g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
-                g.drawText(pingPong ? "<-> LOOP" : "LOOP",
-                           (int)(lx1 + 10.0f), 4, pingPong ? 56 : 34, 13,
-                           juce::Justification::centred, false);
+                g.setColour(juce::Colour(0xffc93b42));
+                g.setFont(juce::Font(juce::FontOptions(12.0f)));
+                g.drawText(pingPong ? "<-> Loop" : "Loop",
+                           (int)(lx1 + 8.0f), (int)(h - 17.0f), 64, 15,
+                           juce::Justification::centredLeft, false);
             }
         }
 
@@ -396,7 +402,6 @@ public:
             const bool norm     = processor.apvts.getRawParameterValue("normalize")->load() > 0.5f;
             const bool zSnap    = processor.zeroCrossSnap.load();
             m.addItem(1, "Reload sample");
-            m.addItem(12, "Detect pitch & set root note (" + juce::MidiMessage::getMidiNoteName(processor.getDetectedSampleRootNote(), true, true, 5) + ")");
             m.addSeparator();
             m.addItem(2, "Use loop points", true, useLoop);
             m.addItem(3, "Ping pong loop", true, pingPong);
@@ -417,29 +422,32 @@ public:
 
             const float clickNorm = processor.snapNormalizedToZeroCrossing(pixelXToNorm((float)e.x));
             const int nearSlice = hitTestSliceIndex(e.x, 12.0f);
-            m.showMenuAsync(juce::PopupMenu::Options(), [this, clickNorm, nearSlice, useLoop, pingPong, rev, norm, zSnap](int res)
+            juce::Component::SafePointer<WAVScopeComponent> safeThis(this);
+            m.showMenuAsync(juce::PopupMenu::Options(), [safeThis, clickNorm, nearSlice, useLoop, pingPong, rev, norm, zSnap](int res)
             {
-                auto setParam = [this](const char* id, float v) {
-                    if (auto* p = processor.apvts.getParameter(id))
+                if (safeThis == nullptr)
+                    return;
+                auto* self = safeThis.getComponent();
+                auto setParam = [self](const char* id, float v) {
+                    if (auto* p = self->processor.apvts.getParameter(id))
                         p->setValueNotifyingHost(p->convertTo0to1(v));
                 };
-                if (res == 1 && processor.getLoadedFile().existsAsFile())
-                    processor.loadSampleFromFile(processor.getLoadedFile());
-                else if (res == 12) setParam("rootNote", (float)processor.getDetectedSampleRootNote());
+                if (res == 1 && self->processor.getLoadedFile().existsAsFile())
+                    self->processor.loadSampleFromFile(self->processor.getLoadedFile());
                 else if (res == 2) setParam("useLoopPoints", useLoop ? 0.0f : 1.0f);
                 else if (res == 3) setParam("pingPongLoop", pingPong ? 0.0f : 1.0f);
                 else if (res == 4) { setParam("useLoopPoints", 1.0f); setParam("loopStart", juce::jmin(0.98f, clickNorm)); }
                 else if (res == 5) { setParam("useLoopPoints", 1.0f); setParam("loopEnd", juce::jmax(0.02f, clickNorm)); }
-                else if (res == 8) processor.zeroCrossSnap.store(!zSnap);
-                else if (res == 13) { float outP = 0.0f; processor.addOrMoveSliceMarker(-1, clickNorm, outP); }
-                else if (res == 14 && nearSlice >= 0) processor.removeSliceMarker(nearSlice);
-                else if (res == 15) processor.clearSliceMarkers();
-                else if (res == 9) displayMode = (displayMode == 1) ? 0 : 1;
-                else if (res == 10) displayMode = (displayMode == 2) ? 0 : 2;
-                else if (res == 11) { viewStartNorm = 0.0f; viewEndNorm = 1.0f; }
+                else if (res == 8) self->processor.zeroCrossSnap.store(!zSnap);
+                else if (res == 13) { float outP = 0.0f; self->processor.addOrMoveSliceMarker(-1, clickNorm, outP); }
+                else if (res == 14 && nearSlice >= 0) self->processor.removeSliceMarker(nearSlice);
+                else if (res == 15) self->processor.clearSliceMarkers();
+                else if (res == 9) self->displayMode = (self->displayMode == 1) ? 0 : 1;
+                else if (res == 10) self->displayMode = (self->displayMode == 2) ? 0 : 2;
+                else if (res == 11) { self->viewStartNorm = 0.0f; self->viewEndNorm = 1.0f; }
                 else if (res == 6) setParam("normalize", norm ? 0.0f : 1.0f);
                 else if (res == 7) setParam("reverse", rev ? 0.0f : 1.0f);
-                repaint();
+                self->repaint();
             });
             return;
         }
@@ -482,10 +490,13 @@ public:
             return;
         }
 
-        // Click-position scrub preview: clicking anywhere on the waveform plays from that position!
-        const float clickNorm = pixelXToNorm((float)e.x);
+        // Clicking anywhere on the waveform previews the entire sample from Start Offset / Loop Start (1:1 FL Studio Sampler)!
         int root = (int)processor.apvts.getRawParameterValue("rootNote")->load();
-        processor.triggerPreviewNote(root, 0.9f, clickNorm);
+        const bool useLoop = processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f;
+        const float startOfs = processor.apvts.getRawParameterValue("startOffset")->load();
+        const float loopStart = processor.apvts.getRawParameterValue("loopStart")->load();
+        const float playStart = (startOfs > 0.0001f) ? startOfs : (useLoop ? loopStart : 0.0f);
+        processor.triggerPreviewNote(root, 0.9f, playStart);
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
@@ -623,11 +634,15 @@ private:
 
     int hitTestMarker(int mouseX) const
     {
-        const bool useLoop = processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f;
-        if (useLoop)
+        const float xfadeVal = processor.apvts.getRawParameterValue("crossfade")->load();
+        const float xfLoopStart = processor.computedCrossfadeLoopStart.load(std::memory_order_relaxed);
+        const bool hasXfadeLoop = (xfadeVal > 0.001f && xfLoopStart >= 0.0f);
+        const bool useLoop = (processor.apvts.getRawParameterValue("useLoopPoints")->load() > 0.5f) || hasXfadeLoop;
+        const float lStart = hasXfadeLoop ? xfLoopStart : processor.apvts.getRawParameterValue("loopStart")->load();
+        const float lEnd   = hasXfadeLoop ? 1.0f        : processor.apvts.getRawParameterValue("loopEnd")->load();
+        const bool showLoopRegion = useLoop && (hasXfadeLoop || lStart > 0.0005f || lEnd < 0.9995f);
+        if (showLoopRegion)
         {
-            const float lStart = processor.apvts.getRawParameterValue("loopStart")->load();
-            const float lEnd   = processor.apvts.getRawParameterValue("loopEnd")->load();
             const float lx1 = normToPixelX(lStart);
             const float lx2 = normToPixelX(lEnd);
             if (std::abs((float)mouseX - lx1) <= 6.0f) return 1;
